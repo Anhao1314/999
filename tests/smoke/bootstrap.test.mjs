@@ -5,10 +5,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-// Bootstrap-stage contract. These tests protect the *foundation* — module mode,
-// frozen MVP scope, honest status reporting and the no-legacy-copy rule — so a
-// future milestone cannot quietly turn this repository into something else.
-// They deliberately do not test business behaviour, because none exists yet.
+// Foundation contract. These tests protect the *repository itself* — module
+// mode, frozen MVP scope, honest status reporting, the extraction contract and
+// the no-legacy-copy rule — so a future milestone cannot quietly turn this
+// repository into something else. Business behaviour is covered by the kernel
+// tests under tests/unit and tests/integration.
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const read = (relative) => readFileSync(join(root, relative), "utf8");
@@ -47,12 +48,30 @@ test("the product definition exists and freezes the three MVPs", () => {
     assert.ok(mvp.includes(object), `mvp doc must name ${object}`);
 });
 
-test("README reports bootstrap status honestly", () => {
+test("README reports implementation status honestly", () => {
   const readme = read("README.md");
-  assert.match(readme, /Re-foundation \/ bootstrap stage/);
-  assert.match(readme, /没有任何 MVP 实现|not started/);
+  assert.match(readme, /Foundation \+ Persistent Work Kernel v0A/);
+  assert.match(readme, /Three MVPs: \*\*still not complete\.\*\*/);
+  assert.match(readme, /docs\/contracts\/persistent-work-kernel-v0\.md/);
   assert.ok(readme.includes("docs/migration/from-flowcredit-worklab-v1.md"));
   assert.match(readme, /capability by capability/);
+});
+
+test("the extraction contract freezes the kernel semantics", () => {
+  const contract = read("docs/contracts/persistent-work-kernel-v0.md");
+  for (const section of [
+    "## 1. Company",
+    "## 2. Work",
+    "## 3. Task",
+    "## 5. Artifact",
+    "## 6. Checkpoint",
+    "## 7. Activity / Event",
+    "## 9. Recovery",
+    "## 10. Cancellation",
+  ])
+    assert.ok(contract.includes(section), `contract must define ${section}`);
+  assert.ok(contract.includes("Duty is not Company"), "the Duty correction must be explicit");
+  assert.match(contract, /Fencing token/i);
 });
 
 test("AGENTS.md carries the reusable engineering rules", () => {
@@ -108,12 +127,20 @@ test("generated state and local tool state are ignored, canonical files are not"
 
 test("no legacy implementation has been copied in", () => {
   for (const legacy of [
-    "apps/runtime/server.mjs",
-    "packages/control-plane/store.mjs",
+    "packages/control-plane",
+    "packages/research-adapter",
+    "packages/harness-adapter",
     "apps/web/swarm-space",
+    "apps/pages/demo-runtime.js",
     "experiments/reconciliation",
+    "fixtures/northstar/seed.mjs",
   ])
     assert.equal(existsSync(join(root, legacy)), false, `legacy path present: ${legacy}`);
+
+  // The runtime app is the new kernel transport, not a copied old server.
+  const server = read("apps/runtime/server.mjs");
+  assert.match(server, /Persistent Work Kernel/);
+  assert.ok(server.includes("packages/runtime/index.mjs"));
 });
 
 test("the repository check passes on a clean tree", () => {

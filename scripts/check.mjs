@@ -1,15 +1,18 @@
-// Bootstrap-era project check. Zero dependencies, no network, no model calls.
+// Project check. Zero dependencies, no network, no model calls.
 //
-// It answers four questions that matter for a clean re-foundation repository:
+// It answers five questions that matter for a clean re-foundation repository:
 //   1. does the required project structure exist,
 //   2. did generated state or local tool state get tracked by mistake,
 //   3. does any tracked file contain something that looks like a credential,
-//   4. has legacy implementation been copied in (see AGENTS.md / migration manifest).
+//   4. has legacy implementation been copied in (see AGENTS.md / migration manifest),
+//   5. does the product core still speak its own domain language
+//      (milestone charter §32: no legacy research vocabulary in `packages/`
+//      or `apps/runtime/`).
 //
 // The legacy tripwire in `LEGACY_SIGNATURES` is intentional and must be updated
 // deliberately when a capability is officially extracted.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -26,7 +29,10 @@ const REQUIRED_PATHS = [
   "docs/product/mvp-v0.md",
   "docs/architecture/principles.md",
   "docs/architecture/object-model.md",
+  "docs/contracts/persistent-work-kernel-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
+  "packages/runtime/index.mjs",
+  "apps/runtime/server.mjs",
 ];
 
 const FORBIDDEN_TRACKED = [
@@ -49,13 +55,44 @@ const FORBIDDEN_TRACKED = [
 
 // Paths that only appear here if an old repository was copied in wholesale.
 const LEGACY_SIGNATURES = [
-  "apps/runtime/server.mjs",
-  "packages/control-plane/store.mjs",
+  "packages/control-plane",
+  "packages/research-adapter",
   "packages/harness-adapter",
   "apps/web/swarm-space",
+  "apps/pages/demo-runtime.js",
   "experiments/reconciliation",
   "fixtures/northstar/seed.mjs",
 ];
+
+// Directories that hold the product core. They must never regain the old
+// domain vocabulary: migration docs, tests and provenance comments may quote
+// it, the running core may not.
+const CORE_ROOTS = ["packages", "apps/runtime"];
+
+// Assembled at runtime so this file does not contain its own tripwires.
+const LEGACY_DOMAIN_TERMS = [
+  [new RegExp(["RESEARCH", "_PENDING"].join(""), "i"), "legacy task state"],
+  [new RegExp(["REVIEW", "_PENDING"].join(""), "i"), "legacy task state"],
+  [new RegExp(["MEMO", "_READY"].join(""), "i"), "legacy task state"],
+  [new RegExp(["north", "star"].join(""), "i"), "legacy duty name"],
+  [new RegExp(["Research", "Duty"].join(""), ""), "legacy duty object"],
+  [new RegExp(["\\b", "memo", "s?\\b"].join(""), "i"), "legacy artifact name"],
+  [new RegExp(["\\b", "claim", "s?\\b"].join(""), "i"), "legacy research object"],
+  [new RegExp(["\\bR-", "0\\d\\b"].join(""), ""), "legacy record id"],
+];
+
+function walkFiles(relative) {
+  const found = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else found.push(path);
+    }
+  };
+  visit(relative);
+  return found;
+}
 
 // Assembled at runtime so this file does not contain the literal it searches
 // for (otherwise the credential scan flags the checker itself).
@@ -112,6 +149,27 @@ for (const signature of LEGACY_SIGNATURES)
   if (fileExists(signature))
     failures.push(`legacy implementation copied in without extraction: ${signature}`);
 
+// --- 5. the core keeps its own language -------------------------------------
+let coreFiles = 0;
+const IMPORT_PATTERN = /(?:^|\n)\s*import\s+(?:[^"'();]*?from\s*)?["']([^"']+)["']/g;
+for (const coreRoot of CORE_ROOTS) {
+  if (!fileExists(coreRoot)) continue;
+  for (const path of walkFiles(coreRoot)) {
+    if (!/\.(mjs|js|json|md)$/.test(path)) continue;
+    coreFiles += 1;
+    const text = readFileSync(join(root, path), "utf8");
+    for (const [pattern, label] of LEGACY_DOMAIN_TERMS)
+      if (pattern.test(text))
+        failures.push(`legacy domain vocabulary (${label}) in core file ${path}`);
+    // The kernel must run with zero third-party dependencies (charter §23, §33).
+    for (const [, specifier] of text.matchAll(IMPORT_PATTERN))
+      if (!specifier.startsWith("node:") && !specifier.startsWith("."))
+        failures.push(
+          `core file ${path} imports a third-party dependency: ${specifier}`,
+        );
+  }
+}
+
 // --- report -----------------------------------------------------------------
 if (failures.length) {
   console.error(`FAIL (${failures.length})`);
@@ -119,6 +177,6 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(
-  `OK — structure: ${REQUIRED_PATHS.length} required files, tracked files: ${tracked.length}, no credentials, no copied legacy.`,
+  `OK — structure: ${REQUIRED_PATHS.length} required files, tracked files: ${tracked.length}, no credentials, no copied legacy, core vocabulary clean (${coreFiles} files).`,
 );
 for (const note of notes) console.log(`note: ${note}`);
