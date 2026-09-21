@@ -1,0 +1,14 @@
+{
+  "name": "flowcredit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "FlowCredit — Personal AI Company OS. Re-foundation bootstrap: no runtime is implemented in this repository yet.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.19.0 <25"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.mjs"
+  }
+}

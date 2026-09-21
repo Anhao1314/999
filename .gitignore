@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Runtime state and generated artifacts — never source
+.runtime/
+.pages/
+dist/
+build/
+coverage/
+
+# Disposable test sandboxes
+.test-*/
+.negative-*/
+
+# Local environment
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+
+# Local databases
+*.sqlite*
+*.db
+*.db-*
+
+# Local agent / IDE state (not part of the product)
+.vscode/
+.xgrok/
+.peridot/
+
+# OS noise
+.DS_Store
+*.tgz
