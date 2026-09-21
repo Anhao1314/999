@@ -36,6 +36,10 @@ test("a fresh store initialises its schema and reports its version", () => {
       tasks: 0,
       checkpoints: 0,
       artifacts: 0,
+      positions: 0,
+      employees: 0,
+      assignments: 0,
+      workerRuns: 0,
       activity: 0,
     });
   } finally {

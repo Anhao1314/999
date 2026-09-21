@@ -22,6 +22,10 @@ export const BOUNDS = Object.freeze({
   cancelNoteMax: 2000,
   digestMax: 128,
   idMax: 128,
+  positionTitleMax: 120,
+  employeeNameMax: 120,
+  providerPreferenceMax: 120,
+  assignmentReasonMax: 500,
 });
 
 export const ACTIVITY_KINDS = Object.freeze([
@@ -74,6 +78,7 @@ export function newArtifact({
   workId,
   taskId,
   generation,
+  workerRunId = null,
   kind,
   title,
   content,
@@ -86,6 +91,7 @@ export function newArtifact({
     workId,
     taskId,
     generation,
+    workerRunId,
     kind,
     title,
     content,

@@ -10,16 +10,23 @@ FlowCredit 认识 Founder，帮助他建立自己的 AI 公司、招聘 AI 员�
 
 ## Current status
 
-**Foundation + Persistent Work Kernel v0A.**
+**Foundation + Persistent Work Kernel v0A + Workforce Identity & Assignment v0B1.**
 
 已实现的是一个不依赖任何模型 provider 的持久 Work Kernel：`Company` / `Work` /
 `Task` / `Artifact` / `Checkpoint` / `Activity` 在进程退出与重启后保持一致、可恢复，
 并带 generation 隔离（旧 execution 的迟到结果无法覆盖新现实）。它跑在 Node 内置的
 `node:sqlite` 上，零第三方依赖。
 
-- 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md)
-- 重启演示：`node scripts/demo-work-kernel.mjs`
-- 还没有 UI、没有 Canvas、没有模型调用。
+v0B1 在此之上加入团队身份与派工：`Position`（岗位能力）/ `Employee`（长期存在的
+AI 员工）/ `Assignment`（谁负责这项 Task）/ `WorkerRun`（一次执行尝试，带自己的
+id 与状态）。员工身份与模型、provider、执行尝试完全解耦：换 provider 不会换人，
+崩溃不会让员工永远"忙碌"。store 已是 schema v2，v0A 的旧 store 会在首次打开时
+一次性迁移并保留全部历史（旧 Artifact 的 producer 保持 `NULL`，不伪造）。
+
+- 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
+  [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md)
+- 重启演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs`
+- 还没有 UI、没有 Canvas、没有模型调用；Review / Repair / Inbox / Hiring / Decision 未开始。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
 都还没有实现——Kernel 只是它们共同的 Runtime 地基。历史能力仍留在旧的 R&D 仓库
@@ -60,6 +67,7 @@ Founder = Authority · Work = Continuity · Runtime = Control · Semantic Sensor
 npm run check                       # 结构 / 密钥 / 生成物 / 核心语言与依赖检查
 npm test                            # node --test（单元 + 真实进程重启集成测试）
 node scripts/demo-work-kernel.mjs   # 持久化与恢复演示（真实进程，SIGKILL 后恢复）
+node scripts/demo-workforce-v0b1.mjs # 派工演示：员工身份跨崩溃存活，Artifact 指明 producer
 node apps/runtime/server.mjs        # 以长期进程方式启动 Kernel
 ```
 
@@ -84,8 +92,11 @@ docs/product/     MVP 定义
 docs/architecture/原则与对象模型
 docs/contracts/   Persistent Work Kernel v0A 契约
 docs/migration/   旧仓库能力迁移清单与 provenance
-packages/         company（公司根对象）/ work（Work、Task、生命周期）/ runtime（命令、存储）
+packages/         company（公司根对象）/ work（Work、Task、生命周期）/
+                  workforce（Position、Employee、Assignment、WorkerRun、Work Packet）/
+                  runtime（命令、存储、schema 迁移）
 apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam）
+fixtures/         种子数据（system workforce roster），不属于核心语言
 scripts/          check、重启演示与进程 harness
 tests/            smoke / 单元 / 集成测试（node --test）
 ```

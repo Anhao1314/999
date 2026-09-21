@@ -37,8 +37,6 @@ being used as a migration source.
 | **Northstar synthetic研究库** | A/B — `fixtures/northstar/{seed.mjs,identity.mjs}` | synthetic fixture | future `fixtures/` (test material only) | Fixture/research material only. Never a product data source; product surfaces must keep the SYNTHETIC label if it is ever used. |
 | **Pages demos / demo transport** | A/C — `apps/pages/demo-runtime.js`, `scripts/build-pages.mjs`, `.github/workflows/pages.yml` | build artifact for a public demo | none | **Do not migrate to product core.** The public demo stays a rendering of the old repo; the new product must not inherit a preset-simulation transport. |
 
-## Provenance policy
-
 ## Extraction v0A — Persistent Work Kernel
 
 Source: worktree **A**, branch `feat/persistent-repair-loop`, HEAD `27b11e7`
@@ -59,10 +57,45 @@ Behaviour source, invariant by invariant:
 | 9 | Storage engine and transactions | `node:sqlite` `DatabaseSync`, WAL, `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`, ad-hoc `ALTER TABLE` upgrades, `immutable_context` trigger | Same engine and transaction discipline; frozen `schema_meta.version = 1`; any other version fails loudly with `INCOMPATIBLE_SCHEMA_VERSION` (`packages/runtime/store.mjs`) | There is nothing to migrate from, so an ad-hoc upgrade path would be untested code. A versioned store that refuses the unknown is honest; a silent one is not (charter §20). |
 | 10 | Vocabulary | Core states and objects named for the old domain (research, memo, duty, snapshot, claim, R-01) | Core language: Company / Work / Task / Artifact / Checkpoint / Activity / Generation / Recovery | Research becomes a Work type later; it must not be the kernel's mother tongue (charter §8). Enforced by `scripts/check.mjs` (core-language guard), which fails the build if legacy vocabulary reappears in `packages/` or `apps/runtime/`. |
 
-Explicitly **not** extracted in v0A (still open in the table above): budget and
-delegations, runs and employees, review, repair, inbox, decisions, hiring,
-canvas, sensors. Kernel tests: `node --test` (see the milestone report for the
-full matrix).
+Not extracted in v0A (runs and employees were still open then — see
+"Extraction v0B1" below): budget and delegations, runs and employees, review,
+repair, inbox, decisions, hiring, canvas, sensors. Kernel tests: `node --test`
+(see the milestone report for the full matrix).
+
+## Extraction v0B1 — Workforce Identity & Assignment
+
+Source: worktree **A**, branch `feat/persistent-repair-loop`, HEAD `27b11e7`
+(read-only; the working tree was not touched). Sources read: `packages/agent-work/profiles.mjs`,
+`tests/unit/agent-identity.test.mjs`, `packages/control-plane/runtime.mjs`
+(run → profile binding at invoke), `packages/control-plane/store.mjs`
+(one-time `ALTER TABLE runs ADD COLUMN profile` + deterministic backfill).
+
+A's own model was `AgentProfile --(profileId)--> WorkerAssignment --> Runtime Role --> Provider --> Run`,
+with the stated rule that *"provider is deliberately not part of identity"*.
+v0B1 keeps that rule and replaces the two-profile registry with a generic
+Position + Employee registry.
+
+| # | Invariant migrated | Old behaviour (source) | New behaviour (this repo) | Why the shape changed |
+| --- | --- | --- | --- | --- |
+| 1 | Stable employee identity | `SYSTEM_PROFILES` in `packages/agent-work/profiles.mjs`: two frozen literals (`system:research-analyst`, `system:independent-reviewer`) carrying name, role, mission, capabilities, outputContract, reviewPolicy; `findProfileForRole()` mapped a role string back to a profile | `positions` + `employees` rows (`packages/workforce/{positions,employees}.mjs`); a Position carries `title` + `capabilities`, an Employee carries `displayName` + `enabled`. Identity is a stored row, never a lookup by role name | A hardcoded registry cannot express "the company hired someone new". Identity has to be data the company owns, not a constant in the core (charter §7, §26) |
+| 2 | Identity ≠ provider | Stated in the module comment and proved by `agent-identity.test.mjs` — "worker assignment keeps identity stable while the provider changes" (`provider: "native-harness"` vs `"claude-code"`, same `profileId`) | Structural: Employee has **no** model or provider field; `providerPreference` is a nullable *preference*, and nothing in `packages/workforce` names a provider. The run records who worked, not what executed it | A tested convention beats an untested one, but an absent field beats both: if provider cannot be stored on the employee, identity cannot drift with it |
+| 3 | A run binds the identity that produced it | `runtime.mjs` bound run → profile at invoke; historical rows without a profile were fixed by a one-time `ALTER TABLE` + deterministic backfill (`role` → profile, unknown roles left `NULL`) | `worker_runs.employee_id` is `NOT NULL` from creation, with trigger `worker_runs_binding_frozen` refusing any later change; one `RUNNING` run per task and one run per `(task, generation)` | No backfill path exists in v0B1 because nothing precedes it. Making the binding a storage invariant means the old "backfill once, deterministically" step is never needed again |
+| 4 | Historical attribution, honest absence | `agent-identity.test.mjs`: role-only legacy runs are backfilled once; unknown roles stay `NULL` rather than guessed | `artifacts.worker_run_id` is nullable: an artifact produced by a run must name that run, while v0A artifacts keep `NULL` forever *and stay valid*. No placeholder employee, no "system employee" | Absence is represented by absence. `tests/unit/schema-migration.test.mjs` asserts a migrated v0A artifact keeps its bytes, its digest and a `null` producer |
+| 5 | Assignment is a recorded fact | `workerAssignment({work, role, provider})` derived a descriptor (`profileId`, `runtimeRole`, `provider`, `requiredCapabilities`, `assignmentReason: "template_default"`) from the role at call time | Append-only `assignments` rows; the current assignment is the latest row; `assignments_no_update/delete` triggers make history immutable; a task carries `requiredCapabilities` and starting a run refuses when the position no longer satisfies them (`TASK_REQUIREMENTS_UNSATISFIED`) | Assignment answers "who owns this", so it must survive re-assignment and be auditable. Provider left the assignment entirely: that is an execution fact, not an ownership fact |
+| 6 | Vocabulary | Core spoke the shipped roster: `Researcher` / `Reviewer` roles, capability literals `research` / `review`, `system:*` ids | Core speaks Position / Employee / capability ids. The shipped roster is **seed data**: `fixtures/seeds/system-workforce.mjs` (`pos_system_*`, `emp_system_*`, `research.execute`, `review.independent`), never core logic. `scripts/check.mjs` fails the build if those names appear anywhere in `packages/` or `apps/runtime/` | Same rule as v0A row 10, one level deeper: it is not enough for the kernel to avoid research *vocabulary* — it must not contain the *employees* either (charter §32) |
+
+Not migrated from A in v0B1: the role-specific web/UI presentation of the two
+profiles, the provider registry and provider dispatch, and `mission` /
+`outputContract` / `reviewPolicy` — a Position carries `title` + `capabilities`
+only, because review and output contracts arrive with the Review/Repair
+milestone. A's `kind: "system"` label has no referent yet: Hiring does not exist,
+and a state nobody can reach is vocabulary nobody can act on (the same reason
+v0A row 2 dropped unreachable states).
+
+Evidence for v0B1: `tests/unit/workforce-{positions-employees,assignment,runs,workpacket}.test.mjs`,
+`tests/unit/schema-migration.test.mjs`, and the real-process hard restart in
+`tests/integration/restart.test.mjs` ("an employee and its assignment survive a
+hard restart, and a new run finishes the work").
 
 ## Provenance policy
 

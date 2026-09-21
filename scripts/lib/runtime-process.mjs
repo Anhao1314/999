@@ -3,11 +3,13 @@
 // Starts `apps/runtime/server.mjs` as a real child process on an ephemeral
 // loopback port and gives tests and the demonstration a way to stop it
 // gracefully or kill it hard. Shared by tests/integration/restart.test.mjs and
-// scripts/demo-work-kernel.mjs.
+// scripts/demo-work-kernel.mjs / scripts/demo-workforce-v0b1.mjs.
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const READY_PATTERN = /FlowCredit runtime v0A ready on http:\/\/127\.0\.0\.1:(\d+)/;
+// Milestone-neutral on purpose: the ready line names the product, never a
+// milestone, so every later milestone can reuse this harness unchanged.
+const READY_PATTERN = /FlowCredit runtime ready on http:\/\/127\.0\.0\.1:(\d+)/;
 
 export function repoRoot() {
   return fileURLToPath(new URL("../../", import.meta.url));

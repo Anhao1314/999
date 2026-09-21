@@ -14,6 +14,7 @@ export {
   transitionsFrom,
 } from "../work/work.mjs";
 export { ACTIVITY_KINDS, BOUNDS } from "../work/records.mjs";
+export * from "../workforce/index.mjs";
 
 export function openKernel(options) {
   return new WorkKernel(options);

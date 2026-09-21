@@ -50,9 +50,13 @@ test("the product definition exists and freezes the three MVPs", () => {
 
 test("README reports implementation status honestly", () => {
   const readme = read("README.md");
-  assert.match(readme, /Foundation \+ Persistent Work Kernel v0A/);
+  assert.match(
+    readme,
+    /Foundation \+ Persistent Work Kernel v0A \+ Workforce Identity & Assignment v0B1/,
+  );
   assert.match(readme, /Three MVPs: \*\*still not complete\.\*\*/);
   assert.match(readme, /docs\/contracts\/persistent-work-kernel-v0\.md/);
+  assert.match(readme, /docs\/contracts\/workforce-identity-assignment-v0\.md/);
   assert.ok(readme.includes("docs/migration/from-flowcredit-worklab-v1.md"));
   assert.match(readme, /capability by capability/);
 });
@@ -72,6 +76,23 @@ test("the extraction contract freezes the kernel semantics", () => {
     assert.ok(contract.includes(section), `contract must define ${section}`);
   assert.ok(contract.includes("Duty is not Company"), "the Duty correction must be explicit");
   assert.match(contract, /Fencing token/i);
+});
+
+test("the workforce contract freezes identity, assignment and provenance", () => {
+  const contract = read("docs/contracts/workforce-identity-assignment-v0.md");
+  for (const section of [
+    "## 2. Position",
+    "## 3. Employee",
+    "## 4. TaskRequirement",
+    "## 5. Assignment",
+    "## 6. WorkerRun",
+    "## 9. Artifact producer provenance",
+    "## 12. Storage and the v1 → v2 migration",
+    "## 13. Where the system employees live",
+  ])
+    assert.ok(contract.includes(section), `workforce contract must define ${section}`);
+  assert.match(contract, /provider/i, "the contract must address provider vs identity");
+  assert.match(contract, /NULL/, "honest absence of a producer must be stated");
 });
 
 test("AGENTS.md carries the reusable engineering rules", () => {

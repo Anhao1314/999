@@ -1,14 +1,17 @@
-// Minimal runtime process for the Persistent Work Kernel (v0A).
+// Minimal runtime process for the Persistent Work Kernel (v0A/v0B1).
 //
 // Purpose: prove the kernel can be hosted as a long-lived process, and give the
-// restart tests and the demonstration a real process to kill. It is a kernel
-// transport, not a product API: no Founder endpoints, no workforce endpoints.
+// restart tests and the demonstrations a real process to kill. It is a kernel
+// transport, not a product API: no Founder decision endpoints yet, and no
+// projection layer — the UI milestone adds those, not this file.
 //
 //   FLOWCREDIT_RUNTIME_DIR  store directory (default: ./.runtime/kernel)
 //   FLOWCREDIT_PORT         port on 127.0.0.1 (default: 0 = ephemeral)
 //
 // Routes: GET /health, GET /status, GET /companies, GET /companies/:id,
-//         GET /companies/:id/works, GET /works/:id, GET /tasks/:id,
+//         GET /companies/:id/works, GET /companies/:id/positions,
+//         GET /companies/:id/employees, GET /employees/:id, GET /works/:id,
+//         GET /tasks/:id, GET /runs/:id,
 //         POST /commands { command, input }.
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -28,6 +31,14 @@ const COMMANDS = Object.freeze({
   recordArtifact: (kernel, input) => kernel.recordArtifact(input),
   completeTask: (kernel, input) => kernel.completeTask(input),
   cancelTask: (kernel, input) => kernel.cancelTask(input),
+  createPosition: (kernel, input) => kernel.createPosition(input),
+  createEmployee: (kernel, input) => kernel.createEmployee(input),
+  setEmployeeEnabled: (kernel, input) => kernel.setEmployeeEnabled(input),
+  setTaskRequirements: (kernel, input) => kernel.setTaskRequirements(input),
+  assignTask: (kernel, input) => kernel.assignTask(input),
+  startWorkerRun: (kernel, input) => kernel.startWorkerRun(input),
+  completeWorkerRun: (kernel, input) => kernel.completeWorkerRun(input),
+  bootstrapWorkforce: (kernel, input) => kernel.bootstrapWorkforce(input),
   recover: (kernel) => kernel.recover(),
 });
 
@@ -95,14 +106,26 @@ async function handle(request, response) {
   if (request.method === "GET" && segments[0] === "companies" && segments[2] === "works")
     return send(response, 200, { works: kernel.works(segments[1]) });
 
+  if (request.method === "GET" && segments[0] === "companies" && segments[2] === "positions")
+    return send(response, 200, { positions: kernel.positions(segments[1]) });
+
+  if (request.method === "GET" && segments[0] === "companies" && segments[2] === "employees")
+    return send(response, 200, { employees: kernel.employees(segments[1]) });
+
   if (request.method === "GET" && segments[0] === "companies" && segments.length === 2)
     return send(response, 200, { company: kernel.company(segments[1]) });
+
+  if (request.method === "GET" && segments[0] === "employees" && segments.length === 2)
+    return send(response, 200, { employee: kernel.employee(segments[1]) });
 
   if (request.method === "GET" && segments[0] === "works" && segments.length === 2)
     return send(response, 200, kernel.workProjection(segments[1]));
 
   if (request.method === "GET" && segments[0] === "tasks" && segments.length === 2)
     return send(response, 200, kernel.taskDetail(segments[1]));
+
+  if (request.method === "GET" && segments[0] === "runs" && segments.length === 2)
+    return send(response, 200, { workerRun: kernel.workerRun(segments[1]) });
 
   if (request.method === "POST" && url.pathname === "/commands") {
     let payload;
@@ -146,7 +169,7 @@ server.listen(PORT, "127.0.0.1", () => {
         .join(", ")}\n`,
     );
   process.stdout.write(
-    `FlowCredit runtime v0A ready on http://127.0.0.1:${port} dir=${DIR}\n`,
+    `FlowCredit runtime ready on http://127.0.0.1:${port} dir=${DIR}\n`,
   );
 });
 

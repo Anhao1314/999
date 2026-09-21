@@ -1,6 +1,7 @@
 // Input validation for the command boundary. Everything that can reach recorded
 // truth is checked here: shape, bounds, JSON-safety and credential-shaped text.
 import { BOUNDS } from "../work/records.mjs";
+import { isCapability, normalizeCapabilities } from "../workforce/capabilities.mjs";
 import { kernelError } from "./errors.mjs";
 
 // Patterns are assembled at runtime so this guard file does not itself match the
@@ -50,11 +51,45 @@ export function assertInteger(value, field, { min = 0 } = {}) {
   return value;
 }
 
+export function assertEnabled(value, field) {
+  if (typeof value !== "boolean")
+    throw kernelError("INVALID_INPUT", `${field} must be a boolean`);
+  return value;
+}
+
 export function assertKind(value, field) {
   if (typeof value !== "string" || !/^[A-Za-z][A-Za-z0-9_.-]{0,47}$/.test(value))
     throw kernelError(
       "INVALID_INPUT",
       `${field} must start with a letter and use letters, digits, dot, dash or underscore`,
+    );
+  return value;
+}
+
+// Capability identifiers are opaque to the core: validate the shape, then store
+// them sorted and de-duplicated so anything derived from them is deterministic.
+export function assertCapabilityList(value, field) {
+  if (!Array.isArray(value))
+    throw kernelError(
+      "INVALID_CAPABILITY",
+      `${field} must be an array of capability identifiers`,
+    );
+  for (const capability of value)
+    if (!isCapability(capability))
+      throw kernelError(
+        "INVALID_CAPABILITY",
+        `${field} contains an invalid capability: ${JSON.stringify(capability)}`,
+      );
+  return normalizeCapabilities(value);
+}
+
+// Identifiers that may be supplied by a caller (a seed or bootstrap path) must
+// still be stable, opaque strings.
+export function assertRecordId(value, field) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_:.-]{0,127}$/.test(value))
+    throw kernelError(
+      "INVALID_INPUT",
+      `${field} must be a stable identifier (letters, digits, underscore, colon, dot or dash)`,
     );
   return value;
 }

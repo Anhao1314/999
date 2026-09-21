@@ -30,6 +30,7 @@ const REQUIRED_PATHS = [
   "docs/architecture/principles.md",
   "docs/architecture/object-model.md",
   "docs/contracts/persistent-work-kernel-v0.md",
+  "docs/contracts/workforce-identity-assignment-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
   "packages/runtime/index.mjs",
   "apps/runtime/server.mjs",
@@ -79,6 +80,16 @@ const LEGACY_DOMAIN_TERMS = [
   [new RegExp(["\\b", "memo", "s?\\b"].join(""), "i"), "legacy artifact name"],
   [new RegExp(["\\b", "claim", "s?\\b"].join(""), "i"), "legacy research object"],
   [new RegExp(["\\bR-", "0\\d\\b"].join(""), ""), "legacy record id"],
+];
+
+// The workforce core must stay domain-generic: capabilities, requirements,
+// employee ids and position ids are what it handles. Shipped employee names and
+// capability ids are seed *data* (fixtures/seeds/), never core logic.
+const HARDCODED_ROLE_TERMS = [
+  [new RegExp(["Research", " Analyst"].join(""), "i"), "hardcoded employee name"],
+  [new RegExp(["Independent", " Reviewer"].join(""), "i"), "hardcoded employee name"],
+  [new RegExp(["research", ".execute"].join(""), ""), "hardcoded capability id"],
+  [new RegExp(["review", ".independent"].join(""), ""), "hardcoded capability id"],
 ];
 
 function walkFiles(relative) {
@@ -161,11 +172,18 @@ for (const coreRoot of CORE_ROOTS) {
     for (const [pattern, label] of LEGACY_DOMAIN_TERMS)
       if (pattern.test(text))
         failures.push(`legacy domain vocabulary (${label}) in core file ${path}`);
+    for (const [pattern, label] of HARDCODED_ROLE_TERMS)
+      if (pattern.test(text))
+        failures.push(`${label} in core file ${path}`);
     // The kernel must run with zero third-party dependencies (charter §23, §33).
     for (const [, specifier] of text.matchAll(IMPORT_PATTERN))
       if (!specifier.startsWith("node:") && !specifier.startsWith("."))
         failures.push(
           `core file ${path} imports a third-party dependency: ${specifier}`,
+        );
+      else if (/(^|\/)(fixtures|scripts)\//.test(specifier))
+        failures.push(
+          `core file ${path} imports from outside the core: ${specifier}`,
         );
   }
 }

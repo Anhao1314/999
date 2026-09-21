@@ -77,6 +77,7 @@ test("recovery marks an interrupted attempt honestly and never completes it", ()
         workId: work.id,
         companyId: company.id,
         interruptedGeneration: generation,
+        workerRunId: null,
       },
     ]);
 
