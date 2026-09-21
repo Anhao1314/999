@@ -29,6 +29,8 @@ test("the packet has exactly the contracted shape and facts", () => {
       "employee",
       "position",
       "context",
+      "review",
+      "repair",
     ]);
     assert.deepEqual(Object.keys(packet.context), [
       "latestCheckpoint",

@@ -118,3 +118,83 @@ export function seedStaffedTask(
   });
   return { company, work, task, position, employee, assignment };
 }
+
+// A company with two employees: one who produces, one whose position carries
+// the review capability. Nothing here uses a shipped employee name.
+export function seedReviewTeam(
+  kernel,
+  {
+    producerName = "Producer A",
+    reviewerName = "Reviewer B",
+    producerCapabilities = ["capability.produce"],
+    reviewerCapabilities = ["capability.review"],
+  } = {},
+) {
+  const { company, work } = seedCompanyAndWork(kernel);
+  const producerPosition = kernel.createPosition({
+    companyId: company.id,
+    title: "Producer",
+    capabilities: producerCapabilities,
+  });
+  const reviewerPosition = kernel.createPosition({
+    companyId: company.id,
+    title: "Reviewer",
+    capabilities: reviewerCapabilities,
+  });
+  const producer = kernel.createEmployee({
+    companyId: company.id,
+    positionId: producerPosition.id,
+    displayName: producerName,
+  });
+  const reviewer = kernel.createEmployee({
+    companyId: company.id,
+    positionId: reviewerPosition.id,
+    displayName: reviewerName,
+  });
+  return { company, work, producer, reviewer, producerPosition, reviewerPosition };
+}
+
+// The producing half of a review flow: work → task (review required) → assigned
+// → running → artifact recorded. Returns everything the next step needs.
+export function seedTaskInReview(
+  kernel,
+  {
+    capabilities = ["capability.produce"],
+    reviewCapabilities = ["capability.review"],
+    taskTitle = "Produce the analysis",
+    artifactTitle = "Draft analysis",
+    artifactContent = "draft v1\n",
+  } = {},
+) {
+  const team = seedReviewTeam(kernel, {
+    producerCapabilities: capabilities,
+    reviewerCapabilities: reviewCapabilities,
+  });
+  const task = kernel.createTask({
+    workId: team.work.id,
+    title: taskTitle,
+    intent: "One output the founder can act on",
+  });
+  kernel.setTaskRequirements({
+    taskId: task.id,
+    requiredCapabilities: capabilities,
+    reviewCapabilities,
+  });
+  kernel.assignTask({ taskId: task.id, employeeId: team.producer.id, reason: "fixture" });
+  const started = kernel.startWorkerRun({ taskId: task.id });
+  const artifact = kernel.recordArtifact({
+    taskId: task.id,
+    generation: started.generation,
+    workerRunId: started.workerRun.id,
+    kind: "document",
+    title: artifactTitle,
+    content: artifactContent,
+  });
+  return { ...team, task, generation: started.generation, workerRun: started.workerRun, artifact };
+}
+
+// A reviewer run in progress for the review task created by requestReview.
+export function startReviewRun(kernel, { reviewTaskId, reviewerId }) {
+  kernel.assignTask({ taskId: reviewTaskId, employeeId: reviewerId, reason: "fixture" });
+  return kernel.startWorkerRun({ taskId: reviewTaskId });
+}

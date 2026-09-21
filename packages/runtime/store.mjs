@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -158,6 +158,71 @@ CREATE TRIGGER IF NOT EXISTS assignments_no_delete BEFORE DELETE ON assignments
   BEGIN SELECT RAISE(ABORT,'ASSIGNMENT_APPEND_ONLY'); END;
 `;
 
+// v0B2 additions (schema v3): review, repair lineage and artifact supersession.
+const V3_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS reviews(
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  review_task_id TEXT NOT NULL REFERENCES tasks(id),
+  reviewer_worker_run_id TEXT NOT NULL REFERENCES worker_runs(id),
+  target_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  target_artifact_digest TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('PASS','REQUEST_REVISION')),
+  summary TEXT NOT NULL,
+  findings TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reviews_by_work ON reviews(work_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS reviews_one_per_task ON reviews(review_task_id);
+CREATE TABLE IF NOT EXISTS review_requests(
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  review_task_id TEXT NOT NULL REFERENCES tasks(id),
+  source_task_id TEXT NOT NULL REFERENCES tasks(id),
+  target_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  target_artifact_digest TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS review_requests_one_per_task
+  ON review_requests(review_task_id);
+CREATE INDEX IF NOT EXISTS review_requests_by_source
+  ON review_requests(source_task_id, created_at);
+CREATE TABLE IF NOT EXISTS repair_bindings(
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  repair_task_id TEXT NOT NULL REFERENCES tasks(id),
+  review_id TEXT NOT NULL REFERENCES reviews(id),
+  source_task_id TEXT NOT NULL REFERENCES tasks(id),
+  target_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  target_artifact_digest TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS repair_bindings_one_per_review
+  ON repair_bindings(review_id);
+CREATE UNIQUE INDEX IF NOT EXISTS repair_bindings_one_per_task
+  ON repair_bindings(repair_task_id);
+CREATE INDEX IF NOT EXISTS repair_bindings_by_source
+  ON repair_bindings(source_task_id, created_at);
+`;
+
+const V3_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS reviews_no_update BEFORE UPDATE ON reviews
+  BEGIN SELECT RAISE(ABORT,'REVIEW_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS reviews_no_delete BEFORE DELETE ON reviews
+  BEGIN SELECT RAISE(ABORT,'REVIEW_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS review_requests_no_update BEFORE UPDATE ON review_requests
+  BEGIN SELECT RAISE(ABORT,'REVIEW_REQUEST_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS review_requests_no_delete BEFORE DELETE ON review_requests
+  BEGIN SELECT RAISE(ABORT,'REVIEW_REQUEST_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS repair_bindings_no_update BEFORE UPDATE ON repair_bindings
+  BEGIN SELECT RAISE(ABORT,'REPAIR_BINDING_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS repair_bindings_no_delete BEFORE DELETE ON repair_bindings
+  BEGIN SELECT RAISE(ABORT,'REPAIR_BINDING_IMMUTABLE'); END;
+`;
+
 const rowToCompany = (row) =>
   row && { id: row.id, name: row.name, createdAt: row.created_at };
 
@@ -206,6 +271,7 @@ const rowToArtifact = (row) =>
     content: row.content,
     contentDigest: row.content_digest,
     inputDigest: row.input_digest ?? null,
+    supersedesArtifactId: row.supersedes_artifact_id ?? null,
     createdAt: row.created_at,
   };
 
@@ -233,8 +299,49 @@ const rowToRequirements = (row) =>
   row && {
     taskId: row.task_id,
     requiredCapabilities: Object.freeze(JSON.parse(row.required_capabilities)),
+    reviewCapabilities: Object.freeze(JSON.parse(row.review_capabilities ?? "[]")),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+
+const rowToReview = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    reviewTaskId: row.review_task_id,
+    reviewerWorkerRunId: row.reviewer_worker_run_id,
+    targetArtifactId: row.target_artifact_id,
+    targetArtifactDigest: row.target_artifact_digest,
+    verdict: row.verdict,
+    summary: row.summary,
+    findings: Object.freeze(JSON.parse(row.findings)),
+    createdAt: row.created_at,
+  };
+
+const rowToReviewRequest = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    reviewTaskId: row.review_task_id,
+    sourceTaskId: row.source_task_id,
+    targetArtifactId: row.target_artifact_id,
+    targetArtifactDigest: row.target_artifact_digest,
+    createdAt: row.created_at,
+  };
+
+const rowToRepairBinding = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    repairTaskId: row.repair_task_id,
+    reviewId: row.review_id,
+    sourceTaskId: row.source_task_id,
+    targetArtifactId: row.target_artifact_id,
+    targetArtifactDigest: row.target_artifact_digest,
+    createdAt: row.created_at,
   };
 
 const rowToAssignment = (row) =>
@@ -303,10 +410,14 @@ export class KernelStore {
     }
     const version = this.db.prepare("SELECT version FROM schema_meta").get()?.version;
     if (version === SCHEMA_VERSION) return;
-    if (version === 1) {
-      this.transaction(() => this.#migrateV1ToV2());
+    // Stepwise: an old store is walked forward one version at a time, so every
+    // migration step is exercised on every upgrade path, not only on fresh
+    // installs. Each step is its own transaction.
+    if (version === 1) this.transaction(() => this.#migrateV1ToV2());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 2)
+      this.transaction(() => this.#migrateV2ToV3());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
-    }
     throw kernelError(
       "INCOMPATIBLE_SCHEMA_VERSION",
       `store schema version ${version} is not supported by this runtime (expected ${SCHEMA_VERSION})`,
@@ -327,7 +438,32 @@ export class KernelStore {
       this.db.exec(
         "ALTER TABLE artifacts ADD COLUMN worker_run_id TEXT REFERENCES worker_runs(id)",
       );
-    this.db.prepare("UPDATE schema_meta SET version=?").run(SCHEMA_VERSION);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(2);
+  }
+
+  // Explicit v2 → v3 migration: review, repair lineage and artifact
+  // supersession. Nothing is deleted or recreated; a v0A or v0B1 fact keeps its
+  // value and simply gains a null where the new column answers "was this
+  // replaced?".
+  #migrateV2ToV3() {
+    this.db.exec(V3_TABLES_SQL + V3_TRIGGERS_SQL);
+    const artifactColumns = this.db
+      .prepare("PRAGMA table_info(artifacts)")
+      .all()
+      .map((column) => column.name);
+    if (!artifactColumns.includes("supersedes_artifact_id"))
+      this.db.exec(
+        "ALTER TABLE artifacts ADD COLUMN supersedes_artifact_id TEXT REFERENCES artifacts(id)",
+      );
+    const requirementColumns = this.db
+      .prepare("PRAGMA table_info(task_requirements)")
+      .all()
+      .map((column) => column.name);
+    if (!requirementColumns.includes("review_capabilities"))
+      this.db.exec(
+        "ALTER TABLE task_requirements ADD COLUMN review_capabilities TEXT NOT NULL DEFAULT '[]'",
+      );
+    this.db.prepare("UPDATE schema_meta SET version=?").run(3);
   }
 
   get schemaVersion() {
@@ -468,7 +604,7 @@ export class KernelStore {
   insertArtifact(artifact) {
     this.db
       .prepare(
-        "INSERT INTO artifacts(id,company_id,work_id,task_id,generation,worker_run_id,kind,title,content,content_digest,input_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO artifacts(id,company_id,work_id,task_id,generation,worker_run_id,kind,title,content,content_digest,input_digest,supersedes_artifact_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         artifact.id,
@@ -482,6 +618,7 @@ export class KernelStore {
         artifact.content,
         artifact.contentDigest,
         artifact.inputDigest,
+        artifact.supersedesArtifactId ?? null,
         artifact.createdAt,
       );
     return artifact;
@@ -620,11 +757,12 @@ export class KernelStore {
   upsertTaskRequirements(requirements) {
     this.db
       .prepare(
-        "INSERT INTO task_requirements(task_id,required_capabilities,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET required_capabilities=excluded.required_capabilities, updated_at=excluded.updated_at",
+        "INSERT INTO task_requirements(task_id,required_capabilities,review_capabilities,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET required_capabilities=excluded.required_capabilities, review_capabilities=excluded.review_capabilities, updated_at=excluded.updated_at",
       )
       .run(
         requirements.taskId,
         JSON.stringify(requirements.requiredCapabilities),
+        JSON.stringify(requirements.reviewCapabilities ?? []),
         requirements.createdAt,
         requirements.updatedAt,
       );
@@ -737,6 +875,159 @@ export class KernelStore {
       .map(rowToWorkerRun);
   }
 
+  // --- reviews, review requests, repair bindings ----------------------------
+  insertReview(review) {
+    this.db
+      .prepare(
+        "INSERT INTO reviews(id,company_id,work_id,review_task_id,reviewer_worker_run_id,target_artifact_id,target_artifact_digest,verdict,summary,findings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        review.id,
+        review.companyId,
+        review.workId,
+        review.reviewTaskId,
+        review.reviewerWorkerRunId,
+        review.targetArtifactId,
+        review.targetArtifactDigest,
+        review.verdict,
+        review.summary,
+        JSON.stringify(review.findings),
+        review.createdAt,
+      );
+    return review;
+  }
+
+  getReview(id) {
+    return rowToReview(this.db.prepare("SELECT * FROM reviews WHERE id=?").get(id));
+  }
+
+  reviewForTask(reviewTaskId) {
+    return rowToReview(
+      this.db.prepare("SELECT * FROM reviews WHERE review_task_id=?").get(reviewTaskId),
+    );
+  }
+
+  listReviews({ workId = null, targetArtifactId = null } = {}) {
+    const clauses = [];
+    const values = [];
+    if (workId) {
+      clauses.push("work_id=?");
+      values.push(workId);
+    }
+    if (targetArtifactId) {
+      clauses.push("target_artifact_id=?");
+      values.push(targetArtifactId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM reviews${where} ORDER BY created_at, id`)
+      .all(...values)
+      .map(rowToReview);
+  }
+
+  insertReviewRequest(request) {
+    this.db
+      .prepare(
+        "INSERT INTO review_requests(id,company_id,work_id,review_task_id,source_task_id,target_artifact_id,target_artifact_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        request.id,
+        request.companyId,
+        request.workId,
+        request.reviewTaskId,
+        request.sourceTaskId,
+        request.targetArtifactId,
+        request.targetArtifactDigest,
+        request.createdAt,
+      );
+    return request;
+  }
+
+  getReviewRequest(id) {
+    return rowToReviewRequest(
+      this.db.prepare("SELECT * FROM review_requests WHERE id=?").get(id),
+    );
+  }
+
+  reviewRequestForTask(reviewTaskId) {
+    return rowToReviewRequest(
+      this.db.prepare("SELECT * FROM review_requests WHERE review_task_id=?").get(reviewTaskId),
+    );
+  }
+
+  listReviewRequests({ workId = null, sourceTaskId = null } = {}) {
+    const clauses = [];
+    const values = [];
+    if (workId) {
+      clauses.push("work_id=?");
+      values.push(workId);
+    }
+    if (sourceTaskId) {
+      clauses.push("source_task_id=?");
+      values.push(sourceTaskId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM review_requests${where} ORDER BY created_at, id`)
+      .all(...values)
+      .map(rowToReviewRequest);
+  }
+
+  insertRepairBinding(binding) {
+    this.db
+      .prepare(
+        "INSERT INTO repair_bindings(id,company_id,work_id,repair_task_id,review_id,source_task_id,target_artifact_id,target_artifact_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        binding.id,
+        binding.companyId,
+        binding.workId,
+        binding.repairTaskId,
+        binding.reviewId,
+        binding.sourceTaskId,
+        binding.targetArtifactId,
+        binding.targetArtifactDigest,
+        binding.createdAt,
+      );
+    return binding;
+  }
+
+  getRepairBinding(id) {
+    return rowToRepairBinding(
+      this.db.prepare("SELECT * FROM repair_bindings WHERE id=?").get(id),
+    );
+  }
+
+  repairBindingForTask(repairTaskId) {
+    return rowToRepairBinding(
+      this.db.prepare("SELECT * FROM repair_bindings WHERE repair_task_id=?").get(repairTaskId),
+    );
+  }
+
+  repairBindingForReview(reviewId) {
+    return rowToRepairBinding(
+      this.db.prepare("SELECT * FROM repair_bindings WHERE review_id=?").get(reviewId),
+    );
+  }
+
+  listRepairBindings({ workId = null, sourceTaskId = null } = {}) {
+    const clauses = [];
+    const values = [];
+    if (workId) {
+      clauses.push("work_id=?");
+      values.push(workId);
+    }
+    if (sourceTaskId) {
+      clauses.push("source_task_id=?");
+      values.push(sourceTaskId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM repair_bindings${where} ORDER BY created_at, id`)
+      .all(...values)
+      .map(rowToRepairBinding);
+  }
+
   // --- status ---------------------------------------------------------------
   counts() {
     const count = (table) =>
@@ -751,6 +1042,9 @@ export class KernelStore {
       employees: count("employees"),
       assignments: count("assignments"),
       workerRuns: count("worker_runs"),
+      reviews: count("reviews"),
+      reviewRequests: count("review_requests"),
+      repairBindings: count("repair_bindings"),
       activity: count("activity"),
     };
   }

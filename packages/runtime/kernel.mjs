@@ -16,6 +16,11 @@ import {
   startAllowedFrom,
 } from "../work/work.mjs";
 import {
+  deriveCollaboration,
+  latestArtifact,
+  supersessionChain,
+} from "../work/collaboration.mjs";
+import {
   BOUNDS,
   newActivityEvent,
   newArtifact,
@@ -25,17 +30,21 @@ import { kernelError } from "./errors.mjs";
 import {
   assertCapabilityList,
   assertEnabled,
+  assertFindings,
   assertId,
   assertInteger,
   assertKind,
   assertNoSecret,
   assertRecordId,
   assertText,
+  assertVerdict,
   serializeJsonValue,
 } from "./guards.mjs";
 import { KernelStore, SCHEMA_VERSION } from "./store.mjs";
+import { EVENTS } from "./events.mjs";
 import {
   AVAILABILITY,
+  REVIEW_VERDICTS,
   WORKER_RUN_STATES,
   buildWorkPacket,
   deriveAvailability,
@@ -43,6 +52,9 @@ import {
   newAssignment,
   newEmployee,
   newPosition,
+  newRepairBinding,
+  newReview,
+  newReviewRequest,
   newWorkerRun,
   satisfiesCapabilities,
   workPacketDigest,
@@ -168,8 +180,13 @@ export class WorkKernel {
     return this.employee(employee.id);
   }
 
-  setTaskRequirements({ taskId, requiredCapabilities } = {}) {
+  setTaskRequirements({ taskId, requiredCapabilities, reviewCapabilities } = {}) {
     const task = this.#requireTask(taskId);
+    if (this.store.reviewRequestForTask(task.id))
+      throw kernelError(
+        "REVIEW_TASK_NOT_REVIEWABLE",
+        `task ${task.id} is a review task; a review of a review is not a collaboration shape`,
+      );
     if (task.state === TASK_STATES.RUNNING)
       throw kernelError(
         "TASK_REQUIREMENTS_LOCKED",
@@ -184,6 +201,9 @@ export class WorkKernel {
     const requirements = this.#requirementsRecord(
       task.id,
       assertCapabilityList(requiredCapabilities, "requiredCapabilities"),
+      reviewCapabilities === undefined
+        ? (existing?.reviewCapabilities ?? [])
+        : assertCapabilityList(reviewCapabilities, "reviewCapabilities"),
       existing,
     );
     this.store.transaction(() => {
@@ -196,6 +216,7 @@ export class WorkKernel {
         kind: "TASK_REQUIREMENTS_SET",
         detail: {
           requiredCapabilities: requirements.requiredCapabilities,
+          reviewCapabilities: requirements.reviewCapabilities,
           previousCapabilities: existing?.requiredCapabilities ?? [],
         },
       });
@@ -320,6 +341,7 @@ export class WorkKernel {
         : this.#requirementsRecord(
             task.id,
             assertCapabilityList(requiredCapabilities, "requiredCapabilities"),
+            [],
           );
     this.store.transaction(() => {
       this.store.insertTask(task);
@@ -413,9 +435,14 @@ export class WorkKernel {
     title,
     content,
     inputDigest = null,
+    supersedesArtifactId = null,
   } = {}) {
     const task = this.#requireTask(taskId);
     this.#assertExecutionWrite(task, generation);
+    // Supersession is bound to a recorded review: only a Repair Task may replace
+    // an Artifact, and it may replace exactly the one its binding names.
+    const repairBinding = this.store.repairBindingForTask(task.id);
+    const supersedes = this.#assertSupersession(task, repairBinding, supersedesArtifactId);
     // An artifact produced by an employee must name the run that produced it;
     // an artifact produced without a run must stay unattributed.
     const activeRun = this.#activeRun(task.id);
@@ -446,6 +473,7 @@ export class WorkKernel {
       inputDigest: inputDigest
         ? assertText(inputDigest, "inputDigest", BOUNDS.digestMax)
         : null,
+      supersedesArtifactId: supersedes,
       createdAt: this.now(),
     });
     this.store.transaction(() => {
@@ -476,6 +504,20 @@ export class WorkKernel {
             workerRunId: activeRun.id,
           },
         });
+      if (artifact.supersedesArtifactId)
+        this.#event({
+          companyId,
+          workId,
+          taskId: task.id,
+          generation,
+          kind: EVENTS.ARTIFACT_SUPERSEDED,
+          detail: {
+            artifactId: artifact.id,
+            supersededArtifactId: artifact.supersedesArtifactId,
+            repairTaskId: task.id,
+            repairBindingId: repairBinding.id,
+          },
+        });
     });
     return artifact;
   }
@@ -488,6 +530,7 @@ export class WorkKernel {
         "TASK_HAS_ACTIVE_RUN",
         `task ${task.id} is executed by a worker run; finish it with completeWorkerRun`,
       );
+    this.#assertReviewNotRequired(task);
     const outputs = this.store
       .listArtifacts({ taskId: task.id })
       .filter((artifact) => artifact.generation === generation);
@@ -602,6 +645,8 @@ export class WorkKernel {
       position,
       latestCheckpoint: this.store.listCheckpoints(task.id).at(-1) ?? null,
       artifacts: this.store.listArtifacts({ taskId: task.id }),
+      review: this.#reviewSection(task, requirements),
+      repair: this.#repairSection(task),
     });
     const run = newWorkerRun({
       companyId,
@@ -668,6 +713,7 @@ export class WorkKernel {
         "TASK_HAS_NO_ARTIFACT",
         `task ${task.id} has no artifact from generation ${generation}; a worker completion must name the output it produced`,
       );
+    this.#assertReviewNotRequired(task);
     this.store.transaction(() => {
       this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "WORK_COMPLETED");
       this.store.updateTask(task.id, {
@@ -690,6 +736,378 @@ export class WorkKernel {
       });
     });
     return { task: this.task(task.id), workerRun: this.store.getWorkerRun(run.id) };
+  }
+
+  // --- review and repair (v0B2) --------------------------------------------
+
+  // Hand a delivered Artifact off for independent review. This is the *only*
+  // legal completion for a Task whose requirements demand review, and it does
+  // four things in one transaction: completes the run, completes the Task,
+  // creates the Review Task, and records the obligation. A crash can therefore
+  // never leave a Task that looks finished while its review silently vanished.
+  requestReview({ taskId, generation } = {}) {
+    const task = this.#requireTask(taskId);
+    this.#assertExecutionWrite(task, generation);
+    this.#assertNotReviewTask(task);
+    const run = this.#activeRun(task.id);
+    if (!run)
+      throw kernelError(
+        "NO_ACTIVE_RUN",
+        `task ${task.id} has no running worker run to hand off`,
+      );
+    const requirements = this.store.getTaskRequirements(task.id);
+    const reviewCapabilities = requirements?.reviewCapabilities ?? [];
+    if (reviewCapabilities.length === 0)
+      throw kernelError(
+        "REVIEW_NOT_REQUIRED",
+        `task ${task.id} does not require review; complete it with completeWorkerRun`,
+      );
+    const outputs = this.store
+      .listArtifacts({ taskId: task.id })
+      .filter((artifact) => artifact.generation === generation);
+    if (outputs.length === 0)
+      throw kernelError(
+        "TASK_HAS_NO_ARTIFACT",
+        `task ${task.id} has no artifact from generation ${generation}; there is nothing to review`,
+      );
+    const target = outputs.at(-1);
+    const { companyId, workId } = this.#contextOfTask(task);
+    const now = this.now();
+    const reviewTask = newTask({
+      workId,
+      title: assertText(`Review: ${task.title}`, "title", BOUNDS.taskTitleMax),
+      intent: `Independently review artifact ${target.id} produced by task ${task.id}.`,
+      createdAt: now,
+    });
+    const reviewRequest = newReviewRequest({
+      companyId,
+      workId,
+      reviewTaskId: reviewTask.id,
+      sourceTaskId: task.id,
+      targetArtifactId: target.id,
+      targetArtifactDigest: target.contentDigest,
+      createdAt: now,
+    });
+    this.store.transaction(() => {
+      this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "WORK_COMPLETED");
+      this.store.updateTask(task.id, {
+        state: TASK_STATES.COMPLETED,
+        generation: task.generation,
+        updatedAt: now,
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: task.id,
+        generation,
+        kind: "task.completed",
+        detail: {
+          artifactId: target.id,
+          artifactCount: outputs.length,
+          workerRunId: run.id,
+          handedOffForReview: true,
+        },
+      });
+      this.store.insertTask(reviewTask);
+      this.#event({
+        companyId,
+        workId,
+        taskId: reviewTask.id,
+        kind: "task.created",
+        detail: { title: reviewTask.title, reviewsTaskId: task.id },
+      });
+      this.store.upsertTaskRequirements({
+        taskId: reviewTask.id,
+        requiredCapabilities: reviewCapabilities,
+        reviewCapabilities: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: reviewTask.id,
+        kind: EVENTS.TASK_REQUIREMENTS_SET,
+        detail: { requiredCapabilities: reviewCapabilities, reviewCapabilities: [] },
+      });
+      this.store.insertReviewRequest(reviewRequest);
+      this.#event({
+        companyId,
+        workId,
+        taskId: reviewTask.id,
+        generation,
+        kind: EVENTS.REVIEW_REQUESTED,
+        detail: {
+          reviewRequestId: reviewRequest.id,
+          sourceTaskId: task.id,
+          targetArtifactId: target.id,
+          targetArtifactDigest: target.contentDigest,
+          requiredCapabilities: reviewCapabilities,
+        },
+      });
+    });
+    return {
+      task: this.task(task.id),
+      workerRun: this.store.getWorkerRun(run.id),
+      targetArtifact: target,
+      reviewTask,
+      reviewRequest,
+    };
+  }
+
+  // The reviewer's judgment, written once. The Review, the run end and the Task
+  // completion commit together, so a Review can never exist without the
+  // completion it belongs to, and a Review Task can never complete without its
+  // Review.
+  submitReview({ reviewTaskId, generation, verdict, summary, findings = [] } = {}) {
+    const task = this.#requireTask(reviewTaskId);
+    this.#assertExecutionWrite(task, generation);
+    const request = this.store.reviewRequestForTask(task.id);
+    if (!request)
+      throw kernelError(
+        "REVIEW_TASK_NOT_REVIEWABLE",
+        `task ${task.id} is not a review task; it has no artifact under review`,
+      );
+    if (this.store.reviewForTask(task.id))
+      throw kernelError(
+        "REVIEW_ALREADY_EXISTS",
+        `review task ${task.id} already has a recorded judgment; a wrong review is corrected by a new cycle`,
+      );
+    const run = this.#activeRun(task.id);
+    if (!run)
+      throw kernelError(
+        "NO_ACTIVE_RUN",
+        `review task ${task.id} has no running worker run to submit from`,
+      );
+    const assignment = this.store.currentAssignment(task.id);
+    if (!assignment || assignment.employeeId !== run.employeeId)
+      throw kernelError(
+        "TASK_NOT_ASSIGNED",
+        `review task ${task.id} is not assigned to the employee of run ${run.id}`,
+      );
+    const target = this.store.getArtifact(request.targetArtifactId);
+    if (!target || target.contentDigest !== request.targetArtifactDigest)
+      throw kernelError(
+        "REVIEW_TARGET_MISMATCH",
+        `review task ${task.id} is bound to artifact ${request.targetArtifactId} at digest ${request.targetArtifactDigest}`,
+      );
+    const { companyId, workId } = this.#contextOfTask(task);
+    if (target.companyId !== companyId || target.workId !== workId || request.workId !== workId)
+      throw kernelError(
+        "REVIEW_TARGET_MISMATCH",
+        `review task ${task.id}, artifact ${target.id} and its request do not share one company and work`,
+      );
+    const cleanVerdict = assertVerdict(verdict);
+    const cleanSummary = assertText(summary, "summary", BOUNDS.reviewSummaryMax);
+    assertNoSecret(cleanSummary, "summary");
+    const cleanFindings = assertFindings(findings, "findings");
+    if (cleanVerdict === REVIEW_VERDICTS.REQUEST_REVISION && cleanFindings.length === 0)
+      throw kernelError(
+        "FINDINGS_REQUIRED",
+        `a REQUEST_REVISION review must say what has to change`,
+      );
+    const review = newReview({
+      companyId,
+      workId,
+      reviewTaskId: task.id,
+      reviewerWorkerRunId: run.id,
+      targetArtifactId: target.id,
+      targetArtifactDigest: target.contentDigest,
+      verdict: cleanVerdict,
+      summary: cleanSummary,
+      findings: cleanFindings,
+      createdAt: this.now(),
+    });
+    this.store.transaction(() => {
+      this.store.insertReview(review);
+      this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "REVIEW_COMPLETED");
+      this.store.updateTask(task.id, {
+        state: TASK_STATES.COMPLETED,
+        generation: task.generation,
+        updatedAt: review.createdAt,
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: task.id,
+        generation,
+        kind: EVENTS.REVIEW_SUBMITTED,
+        detail: {
+          reviewId: review.id,
+          verdict: review.verdict,
+          targetArtifactId: review.targetArtifactId,
+          targetArtifactDigest: review.targetArtifactDigest,
+          findingsCount: review.findings.length,
+        },
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: task.id,
+        generation,
+        kind:
+          review.verdict === REVIEW_VERDICTS.PASS
+            ? EVENTS.REVIEW_PASSED
+            : EVENTS.REVISION_REQUESTED,
+        detail: {
+          reviewId: review.id,
+          targetArtifactId: review.targetArtifactId,
+          findings: review.findings,
+        },
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: task.id,
+        generation,
+        kind: "task.completed",
+        detail: { reviewId: review.id, verdict: review.verdict, workerRunId: run.id },
+      });
+    });
+    return {
+      review,
+      task: this.task(task.id),
+      workerRun: this.store.getWorkerRun(run.id),
+    };
+  }
+
+  // Turn a revision request into a Repair Task with immutable lineage. The
+  // original Task, Artifact and Review are untouched: repair is new work, not a
+  // reopening. One repair per review; a second call returns the existing one.
+  createRepairTask({ reviewId } = {}) {
+    const review = this.store.getReview(assertId(reviewId, "reviewId"));
+    if (!review)
+      throw kernelError("REVIEW_NOT_FOUND", `review ${reviewId} does not exist`);
+    const existing = this.store.repairBindingForReview(review.id);
+    if (existing)
+      return {
+        task: this.task(existing.repairTaskId),
+        repairBinding: existing,
+        assignment: this.store.currentAssignment(existing.repairTaskId) ?? null,
+      };
+    if (review.verdict !== REVIEW_VERDICTS.REQUEST_REVISION)
+      throw kernelError(
+        "REVISION_NOT_REQUESTED",
+        `review ${review.id} is ${review.verdict}; a repair needs a REQUEST_REVISION review`,
+      );
+    const request = this.store.reviewRequestForTask(review.reviewTaskId);
+    if (!request || request.targetArtifactId !== review.targetArtifactId)
+      throw kernelError(
+        "REVIEW_TARGET_MISMATCH",
+        `review ${review.id} is not bound to a recorded review request`,
+      );
+    const sourceTask = this.#requireTask(request.sourceTaskId);
+    const target = this.store.getArtifact(review.targetArtifactId);
+    if (!target || target.contentDigest !== review.targetArtifactDigest)
+      throw kernelError(
+        "REVIEW_TARGET_MISMATCH",
+        `review ${review.id} targets artifact ${review.targetArtifactId} at digest ${review.targetArtifactDigest}`,
+      );
+    const sourceRequirements = this.store.getTaskRequirements(sourceTask.id);
+    const { companyId, workId } = this.#contextOfTask(sourceTask);
+    const now = this.now();
+    const repairTask = newTask({
+      workId,
+      title: assertText(`Repair: ${sourceTask.title}`, "title", BOUNDS.taskTitleMax),
+      intent: `Produce a replacement for artifact ${target.id}, answering review ${review.id}.`,
+      createdAt: now,
+    });
+    const repairBinding = newRepairBinding({
+      companyId,
+      workId,
+      repairTaskId: repairTask.id,
+      reviewId: review.id,
+      sourceTaskId: sourceTask.id,
+      targetArtifactId: review.targetArtifactId,
+      targetArtifactDigest: review.targetArtifactDigest,
+      createdAt: now,
+    });
+    // Deterministic policy, no allocation: the employee who produced the
+    // artifact under review gets the repair, if it is still eligible. Otherwise
+    // the Task stays unassigned — no second-choice employee, no Founder ping.
+    const producerRun = target.workerRunId
+      ? this.store.getWorkerRun(target.workerRunId)
+      : null;
+    const producer = producerRun ? this.store.getEmployee(producerRun.employeeId) : null;
+    let eligible = null;
+    if (producer && producer.enabled && producer.companyId === companyId) {
+      const position = this.store.getPosition(producer.positionId);
+      const missing = missingCapabilities(
+        sourceRequirements?.requiredCapabilities ?? [],
+        position.capabilities,
+      );
+      if (missing.length === 0) eligible = { employee: producer, position };
+    }
+    const assignment = eligible
+      ? newAssignment({
+          companyId,
+          taskId: repairTask.id,
+          employeeId: eligible.employee.id,
+          positionId: eligible.position.id,
+          reason: "original_producer",
+          createdAt: now,
+        })
+      : null;
+    this.store.transaction(() => {
+      this.store.insertTask(repairTask);
+      this.#event({
+        companyId,
+        workId,
+        taskId: repairTask.id,
+        kind: "task.created",
+        detail: { title: repairTask.title, repairsTaskId: sourceTask.id },
+      });
+      this.store.upsertTaskRequirements({
+        taskId: repairTask.id,
+        requiredCapabilities: sourceRequirements?.requiredCapabilities ?? [],
+        reviewCapabilities: sourceRequirements?.reviewCapabilities ?? [],
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.#event({
+        companyId,
+        workId,
+        taskId: repairTask.id,
+        kind: EVENTS.TASK_REQUIREMENTS_SET,
+        detail: {
+          requiredCapabilities: sourceRequirements?.requiredCapabilities ?? [],
+          reviewCapabilities: sourceRequirements?.reviewCapabilities ?? [],
+          copiedFromTaskId: sourceTask.id,
+        },
+      });
+      this.store.insertRepairBinding(repairBinding);
+      this.#event({
+        companyId,
+        workId,
+        taskId: repairTask.id,
+        kind: EVENTS.REPAIR_TASK_CREATED,
+        detail: {
+          repairBindingId: repairBinding.id,
+          reviewId: review.id,
+          sourceTaskId: sourceTask.id,
+          targetArtifactId: repairBinding.targetArtifactId,
+          targetArtifactDigest: repairBinding.targetArtifactDigest,
+          assignedEmployeeId: eligible?.employee.id ?? null,
+        },
+      });
+      if (assignment) {
+        this.store.insertAssignment(assignment);
+        this.#event({
+          companyId,
+          workId,
+          taskId: repairTask.id,
+          kind: EVENTS.TASK_ASSIGNED,
+          detail: {
+            assignmentId: assignment.id,
+            employeeId: assignment.employeeId,
+            positionId: assignment.positionId,
+            reason: assignment.reason,
+            requiredCapabilities: sourceRequirements?.requiredCapabilities ?? [],
+          },
+        });
+      }
+    });
+    return { task: repairTask, repairBinding, assignment };
   }
 
   // Generic, data-driven seed application: positions and employees with stable
@@ -857,6 +1275,36 @@ export class WorkKernel {
     });
   }
 
+  review(id) {
+    return this.store.getReview(assertId(id, "reviewId")) ?? null;
+  }
+
+  reviews({ workId = null, targetArtifactId = null } = {}) {
+    return this.store.listReviews({
+      workId: workId ? assertId(workId, "workId") : null,
+      targetArtifactId: targetArtifactId ? assertId(targetArtifactId, "artifactId") : null,
+    });
+  }
+
+  reviewRequest(id) {
+    return this.store.getReviewRequest(assertId(id, "reviewRequestId")) ?? null;
+  }
+
+  reviewRequestForTask(taskId) {
+    return this.store.reviewRequestForTask(assertId(taskId, "taskId")) ?? null;
+  }
+
+  repairBinding(id) {
+    return this.store.getRepairBinding(assertId(id, "repairBindingId")) ?? null;
+  }
+
+  repairBindings({ workId = null, sourceTaskId = null } = {}) {
+    return this.store.listRepairBindings({
+      workId: workId ? assertId(workId, "workId") : null,
+      sourceTaskId: sourceTaskId ? assertId(sourceTaskId, "sourceTaskId") : null,
+    });
+  }
+
   company(id) {
     return this.store.getCompany(assertId(id, "companyId")) ?? null;
   }
@@ -892,6 +1340,10 @@ export class WorkKernel {
     });
   }
 
+  artifact(id) {
+    return this.store.getArtifact(assertId(id, "artifactId")) ?? null;
+  }
+
   activity({ companyId = null, workId = null, taskId = null, limit = 100 } = {}) {
     return this.store.listActivity({
       companyId: companyId ? assertId(companyId, "companyId") : null,
@@ -905,12 +1357,46 @@ export class WorkKernel {
   workProjection(id) {
     const work = this.#requireWork(id);
     const tasks = this.store.listTasks(work.id);
+    const artifacts = this.store.listArtifacts({ workId: work.id });
+    const reviews = this.store.listReviews({ workId: work.id });
+    const reviewRequests = this.store.listReviewRequests({ workId: work.id });
+    const repairBindings = this.store.listRepairBindings({ workId: work.id });
+    const collaboration = deriveCollaboration({
+      tasks,
+      reviewRequests,
+      reviews,
+      repairBindings,
+      artifacts,
+    });
+    const latest = latestArtifact(artifacts);
     const taskCounts = {};
     for (const task of tasks)
       taskCounts[task.state] = (taskCounts[task.state] ?? 0) + 1;
+    const summary = (task) =>
+      task && {
+        id: task.id,
+        title: task.title,
+        intent: task.intent,
+        state: task.state,
+        generation: task.generation,
+        updatedAt: task.updatedAt,
+      };
     return {
       work,
-      status: deriveWorkStatus(tasks),
+      // v0B2: the Work's own status is derived from Tasks *and* their review
+      // obligations. `taskStatus` keeps the v0A task-only reading available.
+      status: collaboration.status,
+      stage: collaboration.stage,
+      taskStatus: deriveWorkStatus(tasks),
+      collaboration: {
+        outstanding: collaboration.outstanding,
+        round: collaboration.round,
+        openReviewTaskId: collaboration.openReviewTaskId,
+        openRepairTaskId: collaboration.openRepairTaskId,
+        pendingReviewTaskIds: collaboration.pendingReviewTaskIds,
+        unownedRevisionReviewIds: collaboration.unownedRevisionReviewIds,
+        unfinishedRepairTaskIds: collaboration.unfinishedRepairTaskIds,
+      },
       taskCounts,
       tasks: tasks.map((task) => ({
         id: task.id,
@@ -926,6 +1412,40 @@ export class WorkKernel {
           title: task.title,
           generation: task.generation,
         })),
+      latestArtifact: latest
+        ? {
+            id: latest.id,
+            taskId: latest.taskId,
+            generation: latest.generation,
+            kind: latest.kind,
+            title: latest.title,
+            contentDigest: latest.contentDigest,
+            workerRunId: latest.workerRunId,
+            supersedesArtifactId: latest.supersedesArtifactId,
+            createdAt: latest.createdAt,
+          }
+        : null,
+      artifacts: artifacts.map((artifact) => ({
+        id: artifact.id,
+        taskId: artifact.taskId,
+        generation: artifact.generation,
+        kind: artifact.kind,
+        title: artifact.title,
+        contentDigest: artifact.contentDigest,
+        workerRunId: artifact.workerRunId,
+        supersedesArtifactId: artifact.supersedesArtifactId,
+        createdAt: artifact.createdAt,
+      })),
+      reviews,
+      reviewRequests,
+      repairBindings,
+      supersession: supersessionChain(artifacts),
+      latestReview:
+        reviews.length > 0 ? reviews[reviews.length - 1] : null,
+      openReviewTask:
+        summary(tasks.find((task) => task.id === collaboration.openReviewTaskId)) ?? null,
+      openRepairTask:
+        summary(tasks.find((task) => task.id === collaboration.openRepairTaskId)) ?? null,
     };
   }
 
@@ -939,6 +1459,13 @@ export class WorkKernel {
       runs: this.store.listWorkerRuns({ taskId: task.id }),
       checkpoints: this.store.listCheckpoints(task.id),
       artifacts: this.store.listArtifacts({ taskId: task.id }),
+      reviewRequest: this.store.reviewRequestForTask(task.id) ?? null,
+      review: this.store.reviewForTask(task.id) ?? null,
+      repairBinding: this.store.repairBindingForTask(task.id) ?? null,
+      reviews: this.store
+        .listReviewRequests({ sourceTaskId: task.id })
+        .map((request) => this.store.reviewForTask(request.reviewTaskId))
+        .filter(Boolean),
       activity: this.store.listActivity({ taskId: task.id }),
     };
   }
@@ -1013,11 +1540,12 @@ export class WorkKernel {
     });
   }
 
-  #requirementsRecord(taskId, requiredCapabilities, existing = null) {
+  #requirementsRecord(taskId, requiredCapabilities, reviewCapabilities, existing = null) {
     const now = this.now();
     return {
       taskId,
       requiredCapabilities,
+      reviewCapabilities,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -1057,6 +1585,136 @@ export class WorkKernel {
         "TASK_NOT_RUNNING",
         `task ${task.id} is ${task.state}; only a RUNNING task accepts execution writes`,
       );
+  }
+
+  // A review Task is an output of the collaboration protocol, not work that is
+  // itself reviewed: there is no Artifact to hand off and no second-order cycle
+  // in this milestone.
+  #assertNotReviewTask(task) {
+    if (this.store.reviewRequestForTask(task.id))
+      throw kernelError(
+        "REVIEW_TASK_NOT_REVIEWABLE",
+        `task ${task.id} is a review task; a review of a review is not a collaboration shape`,
+      );
+    return task;
+  }
+
+  // Completing a Task that requires review without its Review Task would let a
+  // crash window turn "not delivered" into "done". The only legal exit is
+  // requestReview, which completes the Task and creates the Review Task in one
+  // transaction.
+  #assertReviewNotRequired(task) {
+    const requirements = this.store.getTaskRequirements(task.id);
+    if ((requirements?.reviewCapabilities ?? []).length === 0) return;
+    throw kernelError(
+      "REVIEW_REQUIRED",
+      `task ${task.id} requires review by [${requirements.reviewCapabilities.join(", ")}]; hand the output off with requestReview`,
+    );
+  }
+
+  // One rule, checked in one place: a Repair Task's output must replace exactly
+  // the Artifact its binding names, and an ordinary Task's output must replace
+  // nothing at all.
+  #assertSupersession(task, repairBinding, supersedesArtifactId) {
+    const named = supersedesArtifactId ?? null;
+    if (!repairBinding && named)
+      throw kernelError(
+        "SUPERSEDES_NOT_ALLOWED",
+        `task ${task.id} has no repair binding; only a repair may replace a recorded artifact`,
+      );
+    if (repairBinding && !named)
+      throw kernelError(
+        "SUPERSEDES_REQUIRED",
+        `task ${task.id} repairs artifact ${repairBinding.targetArtifactId}; its output must name that artifact as superseded`,
+      );
+    if (!named) return null;
+    const id = assertId(named, "supersedesArtifactId");
+    const target = this.store.getArtifact(id);
+    if (!target)
+      throw kernelError("SUPERSEDES_NOT_FOUND", `artifact ${id} does not exist`);
+    const { companyId, workId } = this.#contextOfTask(task);
+    if (target.companyId !== companyId || target.workId !== workId)
+      throw kernelError(
+        "SUPERSEDES_OUT_OF_SCOPE",
+        `artifact ${id} belongs to another company or work`,
+      );
+    if (id !== repairBinding.targetArtifactId)
+      throw kernelError(
+        "SUPERSEDES_OUT_OF_SCOPE",
+        `task ${task.id} is bound to replace ${repairBinding.targetArtifactId}, not ${id}`,
+      );
+    return id;
+  }
+
+  // What a reviewer is granted: the exact Artifact to judge, its recorded
+  // digest, and the Task that produced it. Nothing else — no database dump, no
+  // event log, no other Work, no prompt text.
+  #reviewSection(task, requirements) {
+    const request = this.store.reviewRequestForTask(task.id);
+    if (!request) return null;
+    const target = this.store.getArtifact(request.targetArtifactId);
+    const sourceTask = this.store.getTask(request.sourceTaskId);
+    if (!target || !sourceTask)
+      throw kernelError(
+        "REVIEW_TARGET_MISMATCH",
+        `review request ${request.id} references a missing artifact or task`,
+      );
+    return {
+      reviewRequestId: request.id,
+      sourceTask: {
+        id: sourceTask.id,
+        title: sourceTask.title,
+        intent: sourceTask.intent,
+        generation: sourceTask.generation,
+      },
+      targetArtifact: {
+        id: target.id,
+        kind: target.kind,
+        title: target.title,
+        content: target.content,
+        contentDigest: target.contentDigest,
+        generation: target.generation,
+        createdAt: target.createdAt,
+      },
+      reviewedDigest: request.targetArtifactDigest,
+      reviewTask: { id: task.id, title: task.title, intent: task.intent },
+      requiredCapabilities: [...(requirements?.requiredCapabilities ?? [])],
+    };
+  }
+
+  // What a repairer is granted: which output it is correcting, why, and what the
+  // corrected output must replace.
+  #repairSection(task) {
+    const binding = this.store.repairBindingForTask(task.id);
+    if (!binding) return null;
+    const review = this.store.getReview(binding.reviewId);
+    const target = this.store.getArtifact(binding.targetArtifactId);
+    const sourceTask = this.store.getTask(binding.sourceTaskId);
+    if (!review || !target || !sourceTask)
+      throw kernelError(
+        "REPAIR_BINDING_NOT_FOUND",
+        `repair binding ${binding.id} references a missing review, artifact or task`,
+      );
+    return {
+      repairBindingId: binding.id,
+      reviewId: review.id,
+      reviewVerdict: review.verdict,
+      reviewSummary: review.summary,
+      reviewFindings: [...review.findings],
+      sourceTask: {
+        id: sourceTask.id,
+        title: sourceTask.title,
+        intent: sourceTask.intent,
+      },
+      targetArtifact: {
+        id: target.id,
+        kind: target.kind,
+        title: target.title,
+        contentDigest: target.contentDigest,
+        generation: target.generation,
+      },
+      supersedesArtifactId: binding.targetArtifactId,
+    };
   }
 
   #event({ companyId, workId = null, taskId = null, generation = null, kind, detail }) {

@@ -2,6 +2,7 @@
 // truth is checked here: shape, bounds, JSON-safety and credential-shaped text.
 import { BOUNDS } from "../work/records.mjs";
 import { isCapability, normalizeCapabilities } from "../workforce/capabilities.mjs";
+import { REVIEW_VERDICT_VALUES } from "../workforce/reviews.mjs";
 import { kernelError } from "./errors.mjs";
 
 // Patterns are assembled at runtime so this guard file does not itself match the
@@ -92,6 +93,33 @@ export function assertRecordId(value, field) {
       `${field} must be a stable identifier (letters, digits, underscore, colon, dot or dash)`,
     );
   return value;
+}
+
+// A review verdict is one of two words, and nothing else. There is no score, no
+// severity and no probability: the runtime has no consumer that could act on
+// them, and a number nobody reads is a number that will be believed anyway.
+export function assertVerdict(value) {
+  if (!REVIEW_VERDICT_VALUES.includes(value))
+    throw kernelError(
+      "INVALID_VERDICT",
+      `verdict must be one of ${REVIEW_VERDICT_VALUES.join(", ")}`,
+    );
+  return value;
+}
+
+export function assertFindings(value, field) {
+  if (!Array.isArray(value))
+    throw kernelError("INVALID_INPUT", `${field} must be an array of text findings`);
+  if (value.length > BOUNDS.reviewFindingsMax)
+    throw kernelError(
+      "INVALID_INPUT",
+      `${field} must hold at most ${BOUNDS.reviewFindingsMax} findings`,
+    );
+  return value.map((finding, index) => {
+    const text = assertText(finding, `${field}[${index}]`, BOUNDS.reviewFindingMax);
+    assertNoSecret(text, `${field}[${index}]`);
+    return text;
+  });
 }
 
 export function assertNoSecret(text, field) {

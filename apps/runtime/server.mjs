@@ -1,4 +1,4 @@
-// Minimal runtime process for the Persistent Work Kernel (v0A/v0B1).
+// Minimal runtime process for the Persistent Work Kernel (v0A/v0B1/v0B2).
 //
 // Purpose: prove the kernel can be hosted as a long-lived process, and give the
 // restart tests and the demonstrations a real process to kill. It is a kernel
@@ -38,6 +38,9 @@ const COMMANDS = Object.freeze({
   assignTask: (kernel, input) => kernel.assignTask(input),
   startWorkerRun: (kernel, input) => kernel.startWorkerRun(input),
   completeWorkerRun: (kernel, input) => kernel.completeWorkerRun(input),
+  requestReview: (kernel, input) => kernel.requestReview(input),
+  submitReview: (kernel, input) => kernel.submitReview(input),
+  createRepairTask: (kernel, input) => kernel.createRepairTask(input),
   bootstrapWorkforce: (kernel, input) => kernel.bootstrapWorkforce(input),
   recover: (kernel) => kernel.recover(),
 });
@@ -126,6 +129,26 @@ async function handle(request, response) {
 
   if (request.method === "GET" && segments[0] === "runs" && segments.length === 2)
     return send(response, 200, { workerRun: kernel.workerRun(segments[1]) });
+
+  if (request.method === "GET" && segments[0] === "reviews" && segments.length === 2)
+    return send(response, 200, { review: kernel.review(segments[1]) });
+
+  if (request.method === "GET" && segments[0] === "artifacts" && segments.length === 2)
+    return send(response, 200, { artifact: kernel.artifact(segments[1]) });
+
+  if (
+    request.method === "GET" &&
+    segments[0] === "review-requests" &&
+    segments.length === 2
+  )
+    return send(response, 200, { reviewRequest: kernel.reviewRequest(segments[1]) });
+
+  if (
+    request.method === "GET" &&
+    segments[0] === "repair-bindings" &&
+    segments.length === 2
+  )
+    return send(response, 200, { repairBinding: kernel.repairBinding(segments[1]) });
 
   if (request.method === "POST" && url.pathname === "/commands") {
     let payload;

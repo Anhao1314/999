@@ -13,7 +13,8 @@ export {
   transitionAllowed,
   transitionsFrom,
 } from "../work/work.mjs";
-export { ACTIVITY_KINDS, BOUNDS } from "../work/records.mjs";
+export { BOUNDS } from "../work/records.mjs";
+export { EVENTS, LEGACY_LIFECYCLE_KINDS } from "./events.mjs";
 export * from "../workforce/index.mjs";
 
 export function openKernel(options) {

@@ -1,9 +1,11 @@
 # Migration manifest — from FlowCredit-worklab (v1)
 
-Status: **first extraction done — Persistent Work Kernel v0A.** The table below
-still tracks every legacy capability and its status; §"Extraction v0A" records
-what was actually taken, from where, and why its shape changed. No legacy file
-was copied: the kernel was written in this repository's own domain language.
+Status: **three extractions done — Persistent Work Kernel v0A, Workforce
+Identity & Assignment v0B1, Review & Repair Collaboration v0B2.** The table below
+tracks every legacy capability and its status; the §"Extraction …" sections
+record what was actually taken, from where, and why its shape changed. No legacy
+file was copied: every capability was written in this repository's own domain
+language.
 
 Rule: **capability by capability, contract by contract, test by test.** Bulk copy
 (`cp -R`, whole `apps/` / `packages/` / `docs/` trees) is forbidden (see `AGENTS.md`).
@@ -27,9 +29,9 @@ being used as a migration source.
 | Capability | Source | Status | Target in this repo | Migration policy |
 | --- | --- | --- | --- | --- |
 | **Persistent Work substrate** (Duty/Task/Run/Checkpoint/Artifact/Budget) | A — `packages/control-plane/{runtime,store}.mjs`, `apps/runtime/server.mjs`; commit `0c8b023` + H0–H3 baseline | **extracted in v0A** — kernel only (Company/Work/Task/Artifact/Checkpoint/Activity). Budget, delegations and runs are *not* extracted | `packages/company` + `packages/work` + `packages/runtime` + `apps/runtime` (split by layer, not by file) | Extract the object semantics first (states, invariants, transitions), then re-implement against the new object model. `Duty` was deliberately **not** mapped to Company (see §Extraction v0A, item 1). |
-| **Repair loop** (REQUEST_REVISION → Repair Task → START_REPAIR → lineage) | A — commit `163ba6a`, hardened by `afc2658`; tests `tests/integration/repair-loop.test.mjs` (872 lines), `tests/support/revision-stub.mjs` | committed, validated | `packages/work` (repair as first-class Work relationship) | **A is canonical.** B implemented the same milestone independently (`4a8bc0e`, +1239 test lines); do not merge both. Port A's semantics, then reconcile any B-only invariant as an explicit review item. |
+| **Repair loop** (REQUEST_REVISION → Repair Task → START_REPAIR → lineage) | A — commits `163ba6a`, `afc2658`, `80abacb`; tests `tests/integration/repair-loop.test.mjs` (13 tests), `tests/unit/review-scope.test.mjs`, `tests/support/revision-stub.mjs` | **extracted in v0B2** — immutable Review, Repair Task + RepairBinding lineage, Artifact supersession. A's human `START_REPAIR` gate and research state names did *not* migrate (see §Extraction v0B2) | `packages/workforce` (`reviews` / `review-requests` / `repair-bindings`), `packages/work/collaboration.mjs` (projection), `packages/runtime` (commands, storage) | **A is canonical.** B implemented the same milestone independently (`4a8bc0e`, +1239 test lines); do not merge both. Port A's semantics, then reconcile any B-only invariant as an explicit review item. |
 | **Founder Inbox** (pure projection of runtime conditions) | A — commit `27b11e7`; `apps/web/view-model.js` (`projectFounderInbox`), `tests/unit/inbox.test.mjs` | committed, validated | `packages/projections` + later Canvas Inbox module | Port the *classifier rules* (action-driven, not state-name-driven; id determinism; reading is not an exit) as a contract + tests. Keep the UI mapping out of the first extraction. |
-| **Agent Identity** (stable system profiles) | A — commit `c2e1199`; `packages/agent-work/profiles.mjs`, `tests/unit/agent-identity.test.mjs` | committed, validated | `packages/workforce` | Seed of MVP 2/3. Generalize from two system profiles (Researcher/Reviewer) to **Position + Employee**; keep the rule that identity comes from recorded runs, never from a role guess. |
+| **Agent Identity** (stable system profiles) | A — commit `c2e1199`; `packages/agent-work/profiles.mjs`, `tests/unit/agent-identity.test.mjs` | **extracted in v0B1** | `packages/workforce` | Seed of MVP 2/3, done: the two system profiles became generic **Position + Employee** rows, and identity still comes from recorded runs, never from a role guess. A's `mission` / `outputContract` / `reviewPolicy` fields moved into this repository's *contract* vocabulary (`review_capabilities`), not into a profile object. |
 | **Founder Decision Closure** | A — **uncommitted** (`packages/control-plane/store.mjs` `resolve(disposition)`, `apps/runtime/server.mjs` disposition branch), test `tests/integration/decision-closure.test.mjs` | uncommitted work in progress | `packages/decision` (human decision record) | **Must be committed in A before extraction** (it exists only as working-tree state today). Policy: a decision is explicit or fails closed — nothing defaults to ACCEPT. |
 | **Company Canvas Interaction Foundation** | A — **uncommitted** `apps/web/company-canvas/*` + `docs/company-canvas-ui-port-contract-v0.md`; tests `tests/unit/company-canvas-{contracts,interaction,projection}.test.mjs` | uncommitted, browser-verified | `apps/web` (future shell) + `docs/architecture` contract | Migrate the **contract** (slots, hooks, interaction arbitration, layout schema, projection boundary) and its tests — not the reference skin. Blocks MVP 1's "personalized Company Canvas" only after Genesis exists. |
 | **Decision Plane / Jev / reconciliation evidence** | B — commits `296661f`, `85625c6`, `19aaec8` + uncommitted `packages/decision-plane/*`, `packages/control-plane/jev-*.mjs`, `experiments/reconciliation/**` | research, shadow-only | `experiments/jev/` (never `packages/`) | **NOT a production migration.** The new Runtime must run with zero sensor dependencies. Future policy: `SemanticSensor → structured probability signal`, resolved from evidence, not from a hard `@typesafe-ai/sdk` import inside product packages. |
@@ -97,6 +99,39 @@ Evidence for v0B1: `tests/unit/workforce-{positions-employees,assignment,runs,wo
 `tests/integration/restart.test.mjs` ("an employee and its assignment survive a
 hard restart, and a new run finishes the work").
 
+## Extraction v0B2 — Review & Repair Collaboration
+
+Source: worktree **A**, branch `feat/persistent-repair-loop`, HEAD `27b11e7`
+(working tree left untouched; §2 of the milestone charter). All three repair
+commits are committed work in A: `163ba6a` (explicit persistent repair loop),
+`afc2658` (normalized repair start and abandon semantics) and `80abacb`
+(reviewer citations bound to supplied excerpts).
+
+| # | Invariant migrated | Old behaviour (source) | New behaviour (this repo) | Why the shape changed |
+| --- | --- | --- | --- | --- |
+| 1 | Review is an obligation, not a task state | `REVIEW_PENDING` was a Task state; `reviewInput(id)` (`packages/control-plane/runtime.mjs`) resolved the review target from the research record at call time | `task_requirements.review_capabilities` declares the obligation; `requestReview` creates a **separate Review Task** plus an immutable `ReviewRequest`, and `completeTask` refuses while a review is owed (`REVIEW_REQUIRED`) | The old state name fused "this work is waiting for review" into the execution lifecycle, so a crashed review left the task in a state nobody could act on. Here the obligation is data and the review is its own Task, so v0A's five states stay exactly five |
+| 2 | The review record is immutable | `review()` / `reviewInput()` read and wrote review fields next to the record they judged (`runtime.mjs`) | `reviews` rows carrying `PASS` / `REQUEST_REVISION` only (`packages/workforce/reviews.mjs`), with storage triggers `reviews_no_update` / `reviews_no_delete` (`REVIEW_IMMUTABLE`) | A judgment that can be edited is not a judgment. A wrong Review is corrected by a new cycle, never by rewriting history — the same rule v0A applies to Artifacts and Checkpoints |
+| 3 | A review judges one exact Artifact | `reviewInput(id)` meant "whatever the current artifact is" — the target was implicit | `ReviewRequest` and `Review` both bind `targetArtifactId` + `targetArtifactDigest`; `submitReview` refuses a digest that changed (`REVIEW_TARGET_MISMATCH`) | "Review whatever is latest" drifts under repair: without a digest, a review could pass an Artifact it never read |
+| 4 | A reviewer is an ordinary worker | The research runtime invoked a reviewer role internally (`runtimeRole` + provider dispatch), on a path separate from producer runs | Review Task → `assignTask` → `startWorkerRun` → review **Work Packet** (`packetVersion 2`) → `submitReview`. No reviewer process, no second runtime, same generation fencing and one-active-run rule | v0B1 already made employees, assignments and runs generic, so a reviewer needs no special machinery — and a special reviewer runtime would be the second state machine this milestone explicitly refuses |
+| 5 | Repair is a new Task with exact lineage | `createRepairTask()` (`store.mjs`) created a child task and wrote `repairBinding()` (`parentTaskId` + source artifact + reason); "the open repair task" was how a repair was found again | `RepairBinding {repairTaskId (unique), reviewId (unique), sourceTaskId, targetArtifactId, targetArtifactDigest}`; `createRepairTask({ reviewId })` is idempotent per Review and copies the source requirements (`requiredCapabilities` **and** `reviewCapabilities`) | The old shape could accumulate repairs and reopen work. Keying the binding to the Review means one verdict → at most one repair task, forever, and the source Task is never reopened or modified |
+| 6 | Supersession is a pointer, never an overwrite | `supersedesArtifactId` existed on the memo record, with nothing preventing a cross-record or out-of-scope pointer | `artifacts.supersedes_artifact_id` lives on the **new** row; it is required iff the producing Task has a RepairBinding (`SUPERSEDES_REQUIRED`) and forbidden otherwise (`SUPERSEDES_NOT_ALLOWED`), with cross-company / cross-work / out-of-scope pointers rejected (`SUPERSEDES_OUT_OF_SCOPE`). The old Artifact keeps its bytes, digest, producer run and creation time forever | "Latest" must be a projection over a chain, not a mutation. Making supersession a column on the replaced row would have been a write to immutable history |
+| 7 | Repair assignment is deterministic | The repair re-entered the research runtime, which resolved the role again at call time | `createRepairTask` assigns the Artifact's producer **iff** it exists, is enabled, belongs to the same company and still satisfies the copied requirements (`assignmentReason: "original_producer"`); otherwise the Repair Task stays unassigned | v0B2 has no dynamic allocation and no Founder escalation. Silently picking a different employee would change who owns the fix; guessing nothing and recording nobody is the honest default |
+| 8 | The repair packet carries the findings | The reviewer's remarks were passed as free-form repair input | The repair Work Packet adds `repair: { repairBindingId, reviewId, reviewVerdict, reviewSummary, reviewFindings, sourceTask, targetArtifact, supersedesArtifactId }` | The employee must know *which* output it is correcting, *why*, and *what* the corrected output must replace. "Please revise per the feedback" is not a binding |
+
+Not migrated from A in v0B2: A's human `START_REPAIR` gate and its `HUMAN_REVIEW`
+semantics (that is the beginning of Founder attention, which arrives in v0B3),
+the research state names (`RESEARCH_PENDING` / `REVIEW_PENDING` / `MEMO_READY`),
+and the `memo` / `claim` objects the old loop was written in. The old loop was
+also where budget and delegation accounting entered execution; none of that is
+here, so a review or a repair costs nothing and claims nothing.
+
+Evidence for v0B2: `tests/unit/review-request.test.mjs` (6), `review-submission.test.mjs`
+(6), `repair-lineage.test.mjs` (7), `artifact-supersession.test.mjs` (4),
+`review-repair-cycles.test.mjs` (3), `review-cancellation.test.mjs` (3) and the
+real-process hard restart in `tests/integration/restart.test.mjs` ("review and
+repair survive a hard restart without inventing a judgment"). The full
+collaboration is printed by `scripts/demo-review-repair-v0b2.mjs`.
+
 ## Provenance policy
 
 Every future extraction adds a row (or updates one) with:
@@ -112,7 +147,7 @@ code exist and what proved it worked".
 
 ## Known risks to resolve before extraction
 
-1. **Duplicate repair implementations (A vs B).** Decide and record A as canonical; delete the losing implementation in the old repo only after the winner passes its tests in the new one.
+1. **Duplicate repair implementations (A vs B) — resolved for v0B2.** A is recorded as canonical and its repair semantics now pass in this repository (see §Extraction v0B2). Deleting the losing implementation in B is still open, and is the old repos' business, not this one's.
 2. **Duplicate decision semantics.** A's uncommitted `resolve(disposition)` and B's `decision-plane/contracts.mjs` describe overlapping human-decision states; the new `packages/decision` must be one of them, not both.
 3. **Uncommitted-only capabilities.** Decision closure and the Canvas foundation exist only in A's working tree. If A is ever cleaned, they are lost — commit them there first.
 4. **Research vocabulary leakage.** The strongest legacy code paths name Research concepts (claims, snapshots, memos). Extraction must rename them into the object model *before* porting behaviour, or the new product inherits the old mother tongue.

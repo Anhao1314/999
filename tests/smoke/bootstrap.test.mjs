@@ -54,9 +54,12 @@ test("README reports implementation status honestly", () => {
     readme,
     /Foundation \+ Persistent Work Kernel v0A \+ Workforce Identity & Assignment v0B1/,
   );
+  assert.match(readme, /Review \/ Repair Collaboration v0B2/);
+  assert.match(readme, /Reviewer PASS ≠ Founder ACCEPT/);
   assert.match(readme, /Three MVPs: \*\*still not complete\.\*\*/);
   assert.match(readme, /docs\/contracts\/persistent-work-kernel-v0\.md/);
   assert.match(readme, /docs\/contracts\/workforce-identity-assignment-v0\.md/);
+  assert.match(readme, /docs\/contracts\/review-repair-collaboration-v0\.md/);
   assert.ok(readme.includes("docs/migration/from-flowcredit-worklab-v1.md"));
   assert.match(readme, /capability by capability/);
 });
@@ -93,6 +96,26 @@ test("the workforce contract freezes identity, assignment and provenance", () =>
     assert.ok(contract.includes(section), `workforce contract must define ${section}`);
   assert.match(contract, /provider/i, "the contract must address provider vs identity");
   assert.match(contract, /NULL/, "honest absence of a producer must be stated");
+});
+
+test("the review / repair contract freezes the collaboration protocol", () => {
+  const contract = read("docs/contracts/review-repair-collaboration-v0.md");
+  for (const section of [
+    "## 2. Review requirement",
+    "## 4. Review — the immutable judgment record",
+    "## 5. Review execution uses the ordinary workforce",
+    "## 8. Repair",
+    "## 9. Artifact supersession",
+    "## 12. Work collaboration projection",
+    "## 14. Storage: schema v2 → v3",
+  ])
+    assert.ok(contract.includes(section), `review contract must define ${section}`);
+  // The three refusals this milestone exists to make explicit.
+  assert.ok(contract.includes("second state machine"), "repair must reuse the v0A Task lifecycle");
+  assert.ok(contract.includes("REVIEW_IMMUTABLE"), "immutable review history must be stated");
+  assert.ok(contract.includes("never a write to the old one"), "supersession must not rewrite history");
+  assert.match(contract, /PASS does \*\*not\*\* mean Founder ACCEPT/);
+  assert.ok(contract.includes("Reviewer PASS ≠ Founder ACCEPT"));
 });
 
 test("AGENTS.md carries the reusable engineering rules", () => {

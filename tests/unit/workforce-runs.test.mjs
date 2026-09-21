@@ -33,7 +33,7 @@ test("starting a worker run starts the task and the run in one transaction", () 
     assert.equal(storedRun.positionId, position.id);
     assert.equal(storedRun.taskId, task.id);
     assert.equal(storedRun.endedAt, null);
-    assert.equal(workPacket.packetVersion, 1);
+    assert.equal(workPacket.packetVersion, 2);
     assert.equal(kernel.workerRuns({ taskId: task.id }).length, 1);
     assert.equal(kernel.workerRuns({ employeeId: employee.id }).length, 1);
   } finally {
@@ -235,8 +235,12 @@ test("worker completion closes the run and the task together", () => {
     assert.ok(completed.workerRun.endedAt);
     assert.equal(completed.workerRun.endReason, "WORK_COMPLETED");
     assert.equal(kernel.employee(completed.workerRun.employeeId).availability, "AVAILABLE");
-    assert.equal(kernel.workProjection(task.workId).status, "COMPLETED");
-    assert.equal(typeof kernel.accept, "undefined", "there is no Accepted concept in v0B1");
+    assert.equal(
+      kernel.workProjection(task.workId).status,
+      "READY_FOR_DECISION",
+      "nothing is open and no review is owed — the founder decides, nothing is accepted",
+    );
+    assert.equal(typeof kernel.accept, "undefined", "there is no Accepted concept in v0B2");
     kernel.close();
 
     const reopened = reopenKernel(dir);

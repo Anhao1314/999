@@ -1,5 +1,6 @@
 // Record shapes for the Persistent Work Kernel: Checkpoint, Artifact and
-// Activity. Contract: docs/contracts/persistent-work-kernel-v0.md §5–§8.
+// Activity. Contracts: docs/contracts/persistent-work-kernel-v0.md §5–§8,
+// docs/contracts/review-repair-collaboration-v0.md §9 (supersession).
 //
 // These are plain frozen records. The runtime command layer validates input
 // against BOUNDS before constructing them; the store maps them to storage rows.
@@ -26,19 +27,10 @@ export const BOUNDS = Object.freeze({
   employeeNameMax: 120,
   providerPreferenceMax: 120,
   assignmentReasonMax: 500,
+  reviewSummaryMax: 2000,
+  reviewFindingMax: 1000,
+  reviewFindingsMax: 50,
 });
-
-export const ACTIVITY_KINDS = Object.freeze([
-  "company.created",
-  "work.created",
-  "task.created",
-  "task.execution_started",
-  "checkpoint.written",
-  "artifact.recorded",
-  "task.completed",
-  "task.interrupted",
-  "task.cancelled",
-]);
 
 export function newCheckpointId() {
   return `${CHECKPOINT_ID_PREFIX}${randomUUID()}`;
@@ -83,6 +75,7 @@ export function newArtifact({
   title,
   content,
   inputDigest = null,
+  supersedesArtifactId = null,
   createdAt,
 }) {
   return Object.freeze({
@@ -97,6 +90,7 @@ export function newArtifact({
     content,
     contentDigest: digestOf(content),
     inputDigest,
+    supersedesArtifactId,
     createdAt,
   });
 }

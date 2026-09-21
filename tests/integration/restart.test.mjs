@@ -50,7 +50,7 @@ test("a work survives a hard process restart, is recovered honestly, and can be 
       "the restarted process reports what it recovered",
     );
     const status = await runtime.json("/status");
-    assert.equal(status.schemaVersion, 2, "a fresh v0A store migrates to schema v2");
+    assert.equal(status.schemaVersion, 3, "a fresh v0A store migrates to schema v3");
     assert.equal(status.recovery.count, 1);
     assert.equal(status.tasksByState.INTERRUPTED, 1);
 
@@ -85,7 +85,11 @@ test("a work survives a hard process restart, is recovered honestly, and can be 
       generation: resumed.generation,
     });
     assert.equal(completed.state, "COMPLETED");
-    assert.deepEqual(await runtime.json(`/works/${work.id}`).then((view) => view.status), "COMPLETED");
+    assert.deepEqual(
+      await runtime.json(`/works/${work.id}`).then((view) => view.status),
+      "READY_FOR_DECISION",
+      "the work is finished but nothing has been accepted",
+    );
 
     const staleResponse = await fetch(`${runtime.base}/commands`, {
       method: "POST",
@@ -263,6 +267,191 @@ test("an employee and its assignment survive a hard restart, and a new run finis
       ],
       "the audit trail spans both processes and both runs",
     );
+
+    const { code } = await runtime.stop();
+    assert.equal(code, 0);
+    runtime = null;
+  } finally {
+    if (runtime) await runtime.stop().catch(() => {});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review and repair survive a hard restart without inventing a judgment", async () => {
+  const dir = tempStoreDir();
+  let runtime = null;
+  try {
+    runtime = await startRuntime({ dir });
+
+    const company = await runtime.command("createCompany", { name: "Northwind Instruments" });
+    const producerPosition = await runtime.command("createPosition", {
+      companyId: company.id,
+      title: "Analyst",
+      capabilities: ["analysis.execute"],
+    });
+    const reviewerPosition = await runtime.command("createPosition", {
+      companyId: company.id,
+      title: "Quality Reviewer",
+      capabilities: ["quality.review"],
+    });
+    const producer = await runtime.command("createEmployee", {
+      companyId: company.id,
+      positionId: producerPosition.id,
+      displayName: "Atlas",
+    });
+    const reviewer = await runtime.command("createEmployee", {
+      companyId: company.id,
+      positionId: reviewerPosition.id,
+      displayName: "Iris",
+    });
+    const work = await runtime.command("createWork", {
+      companyId: company.id,
+      title: "Evaluate the market option",
+      intent: "The founder needs a defensible read before committing",
+    });
+    const task = await runtime.command("createTask", {
+      workId: work.id,
+      title: "Analyze the evidence",
+      intent: "One analysis the founder can act on",
+      requiredCapabilities: ["analysis.execute"],
+    });
+    await runtime.command("setTaskRequirements", {
+      taskId: task.id,
+      requiredCapabilities: ["analysis.execute"],
+      reviewCapabilities: ["quality.review"],
+    });
+    await runtime.command("assignTask", {
+      taskId: task.id,
+      employeeId: producer.id,
+      reason: "the analyst owns this analysis",
+    });
+    const firstRun = await runtime.command("startWorkerRun", { taskId: task.id });
+    const firstArtifact = await runtime.command("recordArtifact", {
+      taskId: task.id,
+      generation: firstRun.generation,
+      workerRunId: firstRun.workerRun.id,
+      kind: "document",
+      title: "Market option read v1",
+      content: "# Option A\n- upside: reachable\n",
+    });
+    const handedOff = await runtime.command("requestReview", {
+      taskId: task.id,
+      generation: firstRun.generation,
+    });
+    assert.equal(handedOff.task.state, "COMPLETED");
+    await runtime.command("assignTask", {
+      taskId: handedOff.reviewTask.id,
+      employeeId: reviewer.id,
+      reason: "independent review",
+    });
+    const reviewRun = await runtime.command("startWorkerRun", { taskId: handedOff.reviewTask.id });
+    await runtime.command("checkpointTask", {
+      taskId: handedOff.reviewTask.id,
+      generation: reviewRun.generation,
+      label: "read the artifact",
+      state: { read: true },
+    });
+
+    const { signal } = await runtime.crash();
+    assert.equal(signal, "SIGKILL");
+    runtime = null;
+
+    runtime = await startRuntime({ dir });
+    assert.match(runtime.output(), /recovered 1 interrupted execution/);
+    const afterCrash = await runtime.json(`/tasks/${handedOff.reviewTask.id}`);
+    assert.equal(afterCrash.task.state, "INTERRUPTED");
+    assert.equal(afterCrash.runs[0].state, "INTERRUPTED");
+    assert.equal(afterCrash.reviewRequest.targetArtifactId, firstArtifact.id);
+    assert.deepEqual(
+      await runtime.json("/reviews/rev_missing"),
+      { review: null },
+      "a missing review reads as null: the crash did not invent one",
+    );
+    assert.equal((await runtime.json("/status")).counts.reviews, 0, "a crash writes no judgment");
+
+    const resumedReview = await runtime.command("startWorkerRun", {
+      taskId: handedOff.reviewTask.id,
+    });
+    assert.ok(resumedReview.generation > reviewRun.generation);
+    const review = await runtime.command("submitReview", {
+      reviewTaskId: handedOff.reviewTask.id,
+      generation: resumedReview.generation,
+      verdict: "REQUEST_REVISION",
+      summary: "The recommendation is not supported by the evidence given.",
+      findings: ["The downside case is missing."],
+    });
+    assert.equal(review.review.verdict, "REQUEST_REVISION");
+
+    const repair = await runtime.command("createRepairTask", { reviewId: review.review.id });
+    assert.equal(repair.assignment.employeeId, producer.id);
+    const repairRun = await runtime.command("startWorkerRun", { taskId: repair.task.id });
+
+    const secondCrash = await runtime.crash();
+    assert.equal(secondCrash.signal, "SIGKILL");
+    runtime = null;
+
+    runtime = await startRuntime({ dir });
+    const afterRepairCrash = await runtime.json(`/tasks/${repair.task.id}`);
+    assert.equal(afterRepairCrash.task.state, "INTERRUPTED");
+    assert.equal(afterRepairCrash.repairBinding.targetArtifactId, firstArtifact.id);
+    const survivedReview = await runtime.json(`/reviews/${review.review.id}`);
+    assert.deepEqual(survivedReview.review.findings, ["The downside case is missing."]);
+    assert.equal(
+      (await runtime.json(`/artifacts/${firstArtifact.id}`)).artifact.contentDigest,
+      firstArtifact.contentDigest,
+      "the artifact under repair is untouched by the crash",
+    );
+
+    const resumedRepair = await runtime.command("startWorkerRun", { taskId: repair.task.id });
+    assert.notEqual(resumedRepair.workerRun.id, repairRun.workerRun.id, "new attempt, new run");
+    const replacement = await runtime.command("recordArtifact", {
+      taskId: repair.task.id,
+      generation: resumedRepair.generation,
+      workerRunId: resumedRepair.workerRun.id,
+      supersedesArtifactId: firstArtifact.id,
+      kind: "document",
+      title: "Market option read v2",
+      content: "# Option A\n- upside: reachable\n- downside: concentration\n",
+    });
+    assert.equal(replacement.supersedesArtifactId, firstArtifact.id);
+
+    const secondReview = await runtime.command("requestReview", {
+      taskId: repair.task.id,
+      generation: resumedRepair.generation,
+    });
+    await runtime.command("assignTask", {
+      taskId: secondReview.reviewTask.id,
+      employeeId: reviewer.id,
+      reason: "independent review",
+    });
+    const secondReviewRun = await runtime.command("startWorkerRun", {
+      taskId: secondReview.reviewTask.id,
+    });
+    const passed = await runtime.command("submitReview", {
+      reviewTaskId: secondReview.reviewTask.id,
+      generation: secondReviewRun.generation,
+      verdict: "PASS",
+      summary: "The recommendation now matches the evidence supplied.",
+      findings: [],
+    });
+    assert.equal(passed.review.targetArtifactId, replacement.id);
+    assert.equal(passed.task.state, "COMPLETED");
+
+    const projection = (await runtime.json(`/companies/${company.id}/works`)).works;
+    assert.equal(projection.length, 1);
+    const finalWork = await runtime.json(`/works/${work.id}`);
+    assert.equal(finalWork.status, "READY_FOR_DECISION");
+    assert.equal(finalWork.stage, "READY_FOR_DECISION");
+    assert.equal(finalWork.latestArtifact.id, replacement.id);
+    assert.equal(finalWork.artifacts.length, 2, "both versions survive two crashes");
+    assert.equal(
+      finalWork.artifacts.find((artifact) => artifact.id === firstArtifact.id).supersedesArtifactId,
+      null,
+      "the replaced artifact is unchanged",
+    );
+    assert.equal(finalWork.reviews.length, 2);
+    assert.equal(finalWork.repairBindings.length, 1);
+    assert.equal(finalWork.status === "ACCEPTED", false, "nothing was accepted");
 
     const { code } = await runtime.stop();
     assert.equal(code, 0);

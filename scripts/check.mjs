@@ -31,6 +31,7 @@ const REQUIRED_PATHS = [
   "docs/architecture/object-model.md",
   "docs/contracts/persistent-work-kernel-v0.md",
   "docs/contracts/workforce-identity-assignment-v0.md",
+  "docs/contracts/review-repair-collaboration-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
   "packages/runtime/index.mjs",
   "apps/runtime/server.mjs",

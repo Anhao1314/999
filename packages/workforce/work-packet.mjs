@@ -5,7 +5,7 @@
 // order, no database dump, no company history, no event log, no prompt.
 import { digestOf } from "../work/records.mjs";
 
-export const WORK_PACKET_VERSION = 1;
+export const WORK_PACKET_VERSION = 2;
 export const PACKET_ARTIFACT_LIMIT = 20;
 
 const artifactSummary = (artifact) =>
@@ -39,6 +39,8 @@ export function buildWorkPacket({
   position,
   latestCheckpoint = null,
   artifacts = [],
+  review = null,
+  repair = null,
 }) {
   const recent = artifacts.slice(-PACKET_ARTIFACT_LIMIT).map(artifactSummary);
   return Object.freeze({
@@ -75,6 +77,8 @@ export function buildWorkPacket({
       priorArtifacts: Object.freeze(recent),
       priorArtifactCount: artifacts.length,
     }),
+    review: review ? Object.freeze({ ...review }) : null,
+    repair: repair ? Object.freeze({ ...repair }) : null,
   });
 }
 

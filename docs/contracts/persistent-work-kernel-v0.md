@@ -71,6 +71,14 @@ the first sync bug silently lies about reality. Task state *is* the execution
 truth; Work status is a projection of it. An interruption outranks everything,
 because "this Work stopped against our will" is the fact that most needs a human.
 
+> **Superseded in part by v0B2** (`docs/contracts/review-repair-collaboration-v0.md` §12):
+> the `COMPLETED` row above was retired once a Work could owe a review. The
+> projection now also weighs review and repair obligations, and a Work whose
+> Tasks are all terminal *and* whose obligations are satisfied derives
+> `READY_FOR_DECISION` — the ball is with the Founder, nothing is accepted. The
+> v0A task-only reading is preserved unchanged as `taskStatus`; `deriveWorkStatus`
+> itself is unchanged.
+
 ---
 
 ## 3. Task
@@ -290,6 +298,15 @@ Reasons, checked against the actual environment rather than assumed:
 version opens; any other version fails loudly with
 `INCOMPATIBLE_SCHEMA_VERSION` before any read or write (charter §20). There is
 deliberately no migration framework yet — there is nothing to migrate from.
+
+> **Superseded in part by v0B1 and v0B2.** The version is now 3:
+> v0B1 added the workforce tables (schema v2) and v0B2 added
+> `reviews` / `review_requests` / `repair_bindings` (schema v3). The migration
+> runs stepwise (`v1 → v2 → v3`), each step in its own transaction, never
+> deleting, reseeding or recreating a fact; older stores are migrated on first
+> open. See `packages/runtime/store.mjs` and the v0B2 contract §14. The rule
+> above still holds for an unknown *future* version: it fails loudly rather
+> than guessing.
 
 The store is a boundary, not an API: SQL rows are mapped to plain domain records
 inside `packages/runtime/store.mjs`; no SQL shape leaks to commands, projections

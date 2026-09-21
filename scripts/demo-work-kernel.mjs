@@ -4,6 +4,7 @@
 // restart: Company → Work → Task → execution started → Checkpoint → restart →
 // honest recovery of the interrupted attempt → new generation → Artifact →
 // completion → Work projection. Generic Work only: no researcher, no reviewer.
+// The Work projection ends at READY_FOR_DECISION (v0B2): done is not accepted.
 //
 //   node scripts/demo-work-kernel.mjs
 import { rmSync } from "node:fs";
@@ -121,8 +122,15 @@ try {
   report("task completed", `state=${completed.state} generation=${completed.generation}`);
 
   const finalView = await runtime.json(`/works/${work.id}`);
-  assert.equal(finalView.status, "COMPLETED");
-  report("work projection reflects completion", `${finalView.status} ${JSON.stringify(finalView.taskCounts)}`);
+  // v0B2 retired the Work status `COMPLETED`: a finished Task means the Work is
+  // ready for a Founder decision, not accepted. The task-only reading is still
+  // available (and unchanged) as `taskStatus`.
+  assert.equal(finalView.status, "READY_FOR_DECISION");
+  assert.equal(finalView.taskStatus, "COMPLETED");
+  report(
+    "work projection reflects completion",
+    `${finalView.status} (taskStatus ${finalView.taskStatus}) ${JSON.stringify(finalView.taskCounts)}`,
+  );
 
   const finalDetail = await runtime.json(`/tasks/${task.id}`);
   report("audit trail across both processes", finalDetail.activity.map((event) => event.kind).join(" | "));

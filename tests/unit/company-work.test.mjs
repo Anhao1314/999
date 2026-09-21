@@ -117,7 +117,12 @@ test("work status is derived from task truth and never stored", () => {
     });
     afterRestart.completeTask({ taskId: task.id, generation: resumed.generation });
     const completed = afterRestart.workProjection(work.id);
-    assert.equal(completed.status, "COMPLETED");
+    // v0B2: a finished task is not a finished Work. With every task done and no
+    // review owed, the derived status is READY_FOR_DECISION — the founder has
+    // not accepted anything, and nothing claims otherwise.
+    assert.equal(completed.status, "READY_FOR_DECISION");
+    assert.equal(completed.stage, "READY_FOR_DECISION");
+    assert.equal(completed.taskStatus, "COMPLETED", "the task-only reading is kept separately");
     assert.deepEqual(completed.taskCounts, { COMPLETED: 1 });
     assert.deepEqual(completed.attention, []);
     assert.equal(afterRestart.works(company.id).length, 1);
