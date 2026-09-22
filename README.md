@@ -126,7 +126,10 @@ Pulse）。availability 冻结为派生的 `AVAILABLE` / `WORKING` / `DISABLED`�
 第二套 lifecycle、没有缓存、没有 Todo 表：读时从 Runtime truth 重新派生，重启后同一
 truth 投影完全一致，未知 id 显式 404。Founder Attention 仍然只是 Runtime projection；
 Reviewer PASS 不会经由此层变成 ACCEPTED。Pixel Lobby（PR #1）**尚未合并、尚未接入**
-Experience API；生产 Founder Workspace UI、Laya / Jev、General A2A 均未开始。
+Experience API 的缺口已由 Employee Lobby v0 集成填补（见下方与
+[Employee Lobby v0 契约](docs/contracts/employee-lobby-v0.md)）：大厅只是投影的只读客户端，
+唯一的 Founder 写操作是启用/停用员工；该集成**尚未合并到 main**。生产 Founder
+Workspace UI、Laya / Jev、General A2A 均未开始。
 
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
   [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md) ·
@@ -137,12 +140,14 @@ Experience API；生产 Founder Workspace UI、Laya / Jev、General A2A 均未�
   [Worker Harness v0 (Slice 1.1)](docs/contracts/worker-harness-v0.md) ·
   [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md) ·
   [Workforce Experience v0](docs/contracts/workforce-experience-v0.md)
+  · [Employee Lobby v0](docs/contracts/employee-lobby-v0.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
 - UI：Experience v0 只是 Founder Workspace / Employee Lobby 的只读投影后端，生产 UI 与
-  Canvas 尚未开始；已有可禁用的 AI 员工像素大厅与工牌 UI（见下方，PR #1 尚未合并），
-  Pixel Lobby 尚未接入 Experience API；Laya / Jev、General A2A 未开始，Hiring / Genesis
+  Canvas 尚未开始；已有可禁用的 AI 员工像素大厅与工牌 UI（见下方）：在集成分支上它已改为
+  Runtime 投影驱动（LIVE 只读、状态 fail closed、`?demo=1` 为显式模拟），尚未合并到 main；
+  Laya / Jev、General A2A 未开始，Hiring / Genesis
   未开始。协调由确定性的 Continuation Driver 完成（不是 scheduler / event bus / 持久队列）；
   执行由 WorkerHost + `codex-exec` backend 完成（另有确定性的 test backend 用于测试）。
 
@@ -200,11 +205,18 @@ Founder = Authority · Work = Continuity · Runtime = Control · Semantic Sensor
 沿用 `FLOWCREDIT_RUNTIME_DIR`、`FLOWCREDIT_COORDINATION`、`FLOWCREDIT_PORT`；不会自动创建公司、员工或任务。
 默认页面为像素大厅，右上“角色”打开管理层，点击员工打开居中工牌。
 
-- 真实模式：读取持久化员工、岗位、任务、运行、活动与产物元数据；支持现有 Kernel 的分配、启动、启用/停用。
+- LIVE 模式（默认）：大厅是 Workforce Experience v0A 投影的只读客户端 —— 每 2 秒轮询
+  `/experience/companies/:id/workforce`，工牌读 `/experience/employees/:id`，工作线读
+  `/experience/works/:id/lineage`。它不持有 kernel、不读 SQLite、不调度：分配、启动、评审、返工
+  都不在大厅里；唯一的 Founder 写操作是工牌里的启用/停用（`POST /commands` → `setEmployeeEnabled`）。
+  读失败时保留最后已知投影、停止动画与写操作，并明确提示 Runtime 暂不可用，绝不回退成演示数据。
 - `/employees?demo=1` 是明确标记的浏览器内模拟模式；不写 Runtime，也不调用模型。
-- 头像只作本页本地裁剪预览；真实配置保存、暂停/恢复、删除归档、模型、工具与 Token 统计均未接入并禁用。
-- `FLOWCREDIT_EMPLOYEE_UI=0` 禁用新增页面和模块 API；原有 Kernel 路由仍可用。
-- `npm run test:employees` 运行模块单元与 HTTP 集成测试。验收、截图、限制和后端交接见 [集成报告](reports/INTEGRATION_REPORT.md)。
+- 状态词表只有派生的 `AVAILABLE` / `WORKING` / `DISABLED` 与角色 `EXECUTION` / `REVIEW` / `REPAIR`；
+  未知状态 fail closed。活动只按产品语言展示（未知 kind 显示中性短语，不显示原始标识）。
+- 头像只作本页本地裁剪预览；暂停/恢复、删除归档、模型、工具与 Token 统计均未接入并禁用。
+- `FLOWCREDIT_EMPLOYEE_UI=0` 禁用大厅静态页面；原有 Kernel 路由不受影响。
+- `npm run test:employees` 运行模块单元与 HTTP 集成测试。行为契约见
+  [Employee Lobby v0](docs/contracts/employee-lobby-v0.md)；PR #1 阶段的报告保留在 `reports/`（历史材料，以契约为准）。
 
 员工模块仍是本地单用户开发界面，未增加生产登录系统；Runtime 继续只绑定 loopback。
 

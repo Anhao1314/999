@@ -13,6 +13,10 @@ ATTEND · ACCEPT. Not covered (later milestones): Founder Workspace production
 UI, Lobby UI integration, Hiring, Genesis, Canvas persistence, Laya, Jev,
 General A2A, dynamic allocation, schedulers, Knowledge admission.
 
+The Lobby UI integration named above is specified separately, without
+redefining anything here: `docs/contracts/employee-lobby-v0.md`. It consumes
+these projections as a presentation client and adds no authority.
+
 Builds on `docs/contracts/work-continuity-v0.md` (v0B4),
 `docs/contracts/founder-attention-acceptance-v0.md` (v0B3) and everything
 before it. Nothing in those is redefined; this document only says how their

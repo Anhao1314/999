@@ -1,81 +1,120 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { openTempKernel, seedStaffedTask } from '../support/kernel.mjs';
-import { employeeSnapshot, employeeHistory, executeEmployeeCommand, isLocalBrowserRequest, createEmployeeRoutes } from '../../apps/employee/server.mjs';
+import { HttpEmployeeAdapter, workforceToReadModel, EXPERIENCE_PATHS } from '../../apps/employee/adapter.mjs';
 import { DemoEmployeeAdapter } from '../../apps/employee/demo.mjs';
-import { HttpEmployeeAdapter } from '../../apps/employee/adapter.mjs';
-import { EmployeeStore } from '../../apps/employee/domain.mjs';
+import { EmployeeStore, CONNECTION } from '../../apps/employee/domain.mjs';
 
-test('real kernel start → read projection → activity → artifact; no confidential payloads', () => {
-  const {kernel,cleanup}=openTempKernel();try {
-    const {company,task,employee}=seedStaffedTask(kernel);
-    const ack=executeEmployeeCommand(kernel,{companyId:company.id,kind:'start',input:{employeeId:employee.id,taskId:task.id}});
-    assert.equal(ack.state,'confirmed');assert.ok(ack.runId);
-    let snapshot=employeeSnapshot(kernel,company.id);assert.equal(snapshot.runs[0].status,'running');
-    assert.equal(snapshot.runs[0].tokenUsed,null);assert.equal(snapshot.capabilities.pause,false);
-    assert.ok(snapshot.activity.some(e=>e.kind==='WORKER_RUN_STARTED'&&e.employeeId===employee.id));
-    const artifact=kernel.recordArtifact({taskId:task.id,generation:snapshot.runs[0].generation,workerRunId:ack.runId,kind:'document',title:'Validated output',content:'private body never shown by employee API'});
-    snapshot=employeeSnapshot(kernel,company.id);assert.equal(snapshot.tasks[0].artifacts[0].id,artifact.id);
-    assert.ok(!JSON.stringify(snapshot).includes('private body'));assert.ok(!JSON.stringify(snapshot).includes('workPacket'));
-    const history=employeeHistory(kernel,company.id,employee.id);assert.ok(history.items.some(e=>e.kind==='WORKER_RUN_STARTED'));
-    kernel.completeWorkerRun({taskId:task.id,generation:snapshot.runs[0].generation});
-    assert.equal(employeeSnapshot(kernel,company.id).runs[0].status,'completed');
-  }finally{kernel.close();cleanup();}
+const projection = {
+  company: { id: 'c1', name: 'Company One' },
+  summary: { employees: 2, working: 1, available: 1, disabled: 0 },
+  employees: [
+    {
+      employeeId: 'e1',
+      displayName: 'Producer A',
+      position: { id: 'p1', title: 'Producer' },
+      capabilities: ['capability.produce'],
+      availability: 'WORKING',
+      condition: null,
+      currentWork: { workId: 'w1', title: 'Work one', taskId: 't1', role: 'REPAIR', workerRunId: 'r1', generation: 2, attempt: 2, maxAutonomousAttempts: 3 },
+      execution: { backendType: 'codex-exec', backendVersion: '1.0' },
+    },
+    {
+      employeeId: 'e2',
+      displayName: 'Reviewer B',
+      position: { id: 'p2', title: 'Reviewer' },
+      capabilities: [],
+      availability: 'AVAILABLE',
+      condition: null,
+      currentWork: null,
+      execution: null,
+    },
+  ],
+};
+
+test('the Experience projection maps into the lobby read model without inventing state', () => {
+  const model = workforceToReadModel('c1', projection);
+  assert.equal(model.source, 'live');
+  assert.deepEqual(model.summary, { employees: 2, working: 1, available: 1, disabled: 0 });
+  assert.equal(model.employees[0].availability, 'WORKING');
+  assert.equal(model.employees[0].currentWork.role, 'REPAIR');
+  assert.equal(model.employees[0].execution.backendType, 'codex-exec');
+  assert.equal(model.employees[1].availability, 'AVAILABLE');
+  assert.equal(model.employees[1].currentWork, null);
+  const unknown = workforceToReadModel('c1', { summary: { employees: 0, working: 0, available: 0, disabled: 0 }, employees: [{ ...projection.employees[0], currentWork: { ...projection.employees[0].currentWork, role: 'MYSTERY' } }] });
+  assert.equal(unknown.employees[0].currentWork.role, null, 'an unknown role fails closed, never guesses');
 });
-test('live company isolation, unsupported commands and assignment races fail closed', () => {
-  const {kernel,cleanup}=openTempKernel();try{
-    const {company,task,employee}=seedStaffedTask(kernel);const other=kernel.createCompany({name:'Other'});
-    assert.throws(()=>executeEmployeeCommand(kernel,{companyId:other.id,kind:'enabled',input:{employeeId:employee.id,enabled:false}}),e=>e.status===404);
-    assert.throws(()=>employeeHistory(kernel,other.id,employee.id),e=>e.status===404);
-    assert.throws(()=>executeEmployeeCommand(kernel,{companyId:company.id,kind:'archive',input:{employeeId:employee.id}}),e=>e.status===501);
-    assert.throws(()=>employeeHistory(kernel,company.id,employee.id,'oops'),e=>e.code==='INVALID_CURSOR');
-    assert.throws(()=>executeEmployeeCommand(kernel,{companyId:company.id,kind:'assign',input:{employeeId:employee.id,taskId:task.id,expectedAssignmentId:null}}),e=>e.code==='ASSIGNMENT_CHANGED');
-    executeEmployeeCommand(kernel,{companyId:company.id,kind:'start',input:{employeeId:employee.id,taskId:task.id}});
-    assert.throws(()=>executeEmployeeCommand(kernel,{companyId:company.id,kind:'assign',input:{employeeId:employee.id,taskId:task.id}}),e=>e.status===409);
-  }finally{kernel.close();cleanup();}
+
+test('the adapter reads the frozen Experience endpoints and the Founder command seam', async () => {
+  const calls = [];
+  const adapter = new HttpEmployeeAdapter({
+    fetcher: async (path, options = {}) => {
+      calls.push({ path, method: options.method ?? 'GET', body: options.body });
+      if (path === '/companies') return new Response(JSON.stringify({ companies: [{ id: 'c1', name: 'One' }] }), { status: 200 });
+      if (path === EXPERIENCE_PATHS.workforce('c1')) return new Response(JSON.stringify(projection), { status: 200 });
+      if (path === EXPERIENCE_PATHS.employee('e1')) return new Response(JSON.stringify({ employeeId: 'e1', availability: 'WORKING' }), { status: 200 });
+      if (path === EXPERIENCE_PATHS.lineage('w1')) return new Response(JSON.stringify({ work: { workId: 'w1' } }), { status: 200 });
+      if (path === '/commands') return new Response(JSON.stringify({ result: { enabled: true } }), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: 'ROUTE_NOT_FOUND' } }), { status: 404 });
+    },
+  });
+  assert.deepEqual(await adapter.companies(), [{ id: 'c1', name: 'One' }]);
+  const model = await adapter.snapshot('c1');
+  assert.equal(model.companyId, 'c1');
+  assert.equal(model.employees[1].employeeId, 'e2');
+  assert.equal((await adapter.employeeDetail('e1')).employeeId, 'e1');
+  assert.equal((await adapter.lineage('w1')).work.workId, 'w1');
+  await adapter.setEmployeeEnabled('e1', false);
+  const command = calls.find((call) => call.path === '/commands');
+  assert.deepEqual(JSON.parse(command.body), { command: 'setEmployeeEnabled', input: { employeeId: 'e1', enabled: false } });
+  assert.ok(calls.every((call) => call.path !== '/employee-api/snapshot' && call.path !== '/employee-api/commands'), 'the lobby never touches its own legacy routes');
 });
-test('history pages persist and do not overlap; only public summaries exposed',()=>{
-  const {kernel,cleanup}=openTempKernel();try{
-    const {company,employee}=seedStaffedTask(kernel);
-    for(let i=0;i<45;i++)kernel.setEmployeeEnabled({employeeId:employee.id,enabled:i%2!==0});
-    const first=employeeHistory(kernel,company.id,employee.id),next=employeeHistory(kernel,company.id,employee.id,first.nextCursor);
-    assert.equal(first.items.length,20);assert.equal(next.items.length,20);assert.equal(new Set([...first.items,...next.items].map(e=>e.id)).size,40);
-    assert.equal(first.items[0].summary,'员工状态已更新');assert.equal(first.items[0].detail,undefined);
-  }finally{kernel.close();cleanup();}
+
+test('poll failure marks transport unavailable and never fabricates a demo fallback', async () => {
+  let calls = 0;
+  const adapter = new HttpEmployeeAdapter({
+    interval: 30,
+    fetcher: async (path) => {
+      if (path === EXPERIENCE_PATHS.workforce('c1')) {
+        calls += 1;
+        if (calls === 1) return new Response(JSON.stringify(projection), { status: 200 });
+        throw new Error('connection refused');
+      }
+      throw new Error('unexpected path');
+    },
+  });
+  const store = new EmployeeStore();
+  const stop = adapter.subscribe('c1', store);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(store.state.connection, CONNECTION.LIVE);
+    assert.equal(store.state.employees.length, 2);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.equal(store.state.connection, CONNECTION.RUNTIME_UNAVAILABLE);
+    assert.equal(store.state.employees.length, 2, 'the last known projection stays; no synthetic employees appear');
+    assert.equal(store.state.source, 'live');
+    stop();
+    const generation = store.generation;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(store.generation, generation, 'stopping the poller aborts and suppresses late writes');
+  } finally {
+    stop();
+  }
 });
-test('browser mutation origin/host and cross-site guards',()=>{
-  const req=headers=>({headers});assert.ok(isLocalBrowserRequest(req({host:'127.0.0.1:3000',origin:'http://127.0.0.1:3000'})));
-  assert.ok(!isLocalBrowserRequest(req({host:'evil.invalid'})));assert.ok(!isLocalBrowserRequest(req({host:'localhost:3000',origin:'https://evil.invalid'})));
-  assert.ok(!isLocalBrowserRequest(req({host:'localhost:3000','sec-fetch-site':'cross-site'})));
+
+test('a 202 is never treated as a confirmed Founder control', async () => {
+  const adapter = new HttpEmployeeAdapter({ fetcher: async () => new Response(JSON.stringify({ state: 'accepted' }), { status: 202 }) });
+  await assert.rejects(() => adapter.setEmployeeEnabled('e1', false), /尚未确认/);
 });
-test('feature flag leaves both page and API unhandled',async()=>{
-  const route=createEmployeeRoutes(null,{enabled:false});
-  assert.equal(await route({},null,new URL('http://localhost/employees')),false);
-  assert.equal(await route({},null,new URL('http://localhost/employee-api/snapshot')),false);
-});
-test('demo config version conflicts and in-flight version freeze',()=>{
-  const d=new DemoEmployeeAdapter();const e=d.data.employees[0],run=d.data.runs[0];
-  d.updateConfig(e.id,{displayName:'Changed',instructions:'Next instructions',tokenLimitPerRun:20},1);
-  assert.equal(e.configVersion,2);assert.equal(run.configVersion,1);assert.equal(run.tokenLimit,40000);
-  assert.throws(()=>d.updateConfig(e.id,{displayName:'Other'},1),e=>e.status===409);assert.equal(e.displayName,'Changed');
-  assert.throws(()=>d.archive(e.id,e.displayName,2),e=>e.code==='AGENT_HAS_ACTIVE_RUNS');
-});
-test('demo pending command is not completion; cancelled run allows name-checked archive',async()=>{
-  const d=new DemoEmployeeAdapter();const e=d.data.employees[0];const promise=d.command('demo','cancel',{employeeId:e.id});
-  assert.equal(d.data.runs[0].status,'running');assert.throws(()=>d.archive(e.id,e.displayName,1),e=>e.code==='AGENT_HAS_ACTIVE_RUNS');
-  await promise;assert.equal(d.data.runs[0].status,'cancelled');assert.throws(()=>d.archive(e.id,'wrong',1),e=>e.code==='NAME_MISMATCH');
-  d.archive(e.id,e.displayName,1);assert.equal(e.lifecycle,'archived');assert.equal(e.suppressedImport,true);assert.ok(d.data.runs.length);
-});
-test('HTTP adapter never treats 202 as confirmation',async()=>{
-  const a=new HttpEmployeeAdapter({fetcher:async()=>new Response(JSON.stringify({state:'accepted'}),{status:202})});
-  await assert.rejects(()=>a.command('c','pause',{}),/尚未确认/);
-});
-test('poll reconnect replaces full snapshot; stopping aborts active fetch and suppresses late writes',async()=>{
-  let count=0,resolve;
-  const a=new HttpEmployeeAdapter({interval:5,fetcher:async(_,options)=>{count++;if(count===1)throw new Error('offline');return new Promise((res,rej)=>{resolve=()=>res(new Response(JSON.stringify({companyId:'c',source:'live',employees:[],runs:[],tasks:[],activity:[]})));options.signal.addEventListener('abort',()=>rej(new Error('aborted')));});}});
-  const store=new EmployeeStore();const offline=new Promise(done=>{const off=store.subscribe(s=>{if(s.connection==='offline'){off();done();}});});
-  const stop=a.subscribe('c',store);await offline;
-  while(!resolve)await new Promise(r=>setTimeout(r,2));resolve();
-  await new Promise(r=>setTimeout(r,2));assert.equal(store.state.connection,'live');stop();
-  const gen=store.generation;await new Promise(r=>setTimeout(r,15));assert.equal(store.generation,gen);
+
+test('demo and live read models never mix', async () => {
+  const demo = new DemoEmployeeAdapter();
+  const demoModel = await demo.snapshot();
+  assert.equal(demoModel.source, 'mock');
+  assert.equal(demoModel.companyId, 'demo');
+  assert.equal(typeof demo.fetcher, 'undefined', 'the demo adapter has no transport to call');
+  assert.ok(demoModel.employees.every((card) => ['AVAILABLE', 'WORKING', 'DISABLED'].includes(card.availability)));
+  const live = new HttpEmployeeAdapter({ fetcher: async (path) => { if (path === EXPERIENCE_PATHS.workforce('c1')) return new Response(JSON.stringify(projection), { status: 200 }); throw new Error('offline'); } });
+  const liveModel = await live.snapshot('c1');
+  assert.equal(liveModel.source, 'live');
+  assert.ok(liveModel.employees.every((card) => card.employeeId !== 'demo-1'), 'synthetic employees never appear in live results');
 });

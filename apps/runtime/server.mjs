@@ -111,7 +111,7 @@ const COMMANDS = Object.freeze({
 });
 
 const kernel = openKernel({ dir: DIR });
-const employeeRoutes = createEmployeeRoutes(kernel, { enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
+const employeeRoutes = createEmployeeRoutes({ enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
 // The host's choice, made once, visible in one place: whether this process lets
 // the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
 // this observer, and the deterministic NextActionProposer behind it.
