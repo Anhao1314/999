@@ -53,6 +53,7 @@ import {
   projectWorkLineage,
   projectWorkforceLobby,
 } from "../../packages/experience/index.mjs";
+import { createEmployeeRoutes, isLocalBrowserRequest } from "../employee/server.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
 const PORT = Number(process.env.FLOWCREDIT_PORT ?? 0);
@@ -110,6 +111,7 @@ const COMMANDS = Object.freeze({
 });
 
 const kernel = openKernel({ dir: DIR });
+const employeeRoutes = createEmployeeRoutes(kernel, { enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
 // The host's choice, made once, visible in one place: whether this process lets
 // the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
 // this observer, and the deterministic NextActionProposer behind it.
@@ -232,6 +234,8 @@ async function handle(request, response) {
   const url = new URL(request.url, `http://127.0.0.1:${PORT}`);
   const segments = url.pathname.split("/").filter(Boolean);
 
+  if (await employeeRoutes(request, response, url)) return;
+
   if (request.method === "GET" && url.pathname === "/health")
     return send(response, 200, {
       status: "ok",
@@ -341,6 +345,8 @@ async function handle(request, response) {
     return send(response, 200, { repairBinding: kernel.repairBinding(segments[1]) });
 
   if (request.method === "POST" && url.pathname === "/commands") {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
     let payload;
     try {
       payload = JSON.parse((await readBody(request)) || "{}");

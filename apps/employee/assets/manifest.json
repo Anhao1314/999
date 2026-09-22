@@ -1,0 +1,81 @@
+{
+  "license": "Original geometric placeholder assets generated for this task; no third-party game assets.",
+  "frameWidth": 16,
+  "frameHeight": 24,
+  "columns": 8,
+  "rows": 4,
+  "directions": [
+    "front",
+    "back",
+    "right",
+    "left"
+  ],
+  "frames": {
+    "idle": [
+      0
+    ],
+    "walk": [
+      1,
+      2
+    ],
+    "typing": [
+      3,
+      4
+    ],
+    "working": [
+      3
+    ],
+    "talking": [
+      0,
+      5
+    ],
+    "paused": [
+      6
+    ],
+    "error": [
+      7
+    ]
+  },
+  "sprites": [
+    {
+      "id": "sprite-1",
+      "image": "sprite-1.png",
+      "portrait": "portrait-1.png"
+    },
+    {
+      "id": "sprite-2",
+      "image": "sprite-2.png",
+      "portrait": "portrait-2.png"
+    },
+    {
+      "id": "sprite-3",
+      "image": "sprite-3.png",
+      "portrait": "portrait-3.png"
+    },
+    {
+      "id": "sprite-4",
+      "image": "sprite-4.png",
+      "portrait": "portrait-4.png"
+    },
+    {
+      "id": "sprite-5",
+      "image": "sprite-5.png",
+      "portrait": "portrait-5.png"
+    },
+    {
+      "id": "sprite-6",
+      "image": "sprite-6.png",
+      "portrait": "portrait-6.png"
+    },
+    {
+      "id": "sprite-7",
+      "image": "sprite-7.png",
+      "portrait": "portrait-7.png"
+    },
+    {
+      "id": "sprite-8",
+      "image": "sprite-8.png",
+      "portrait": "portrait-8.png"
+    }
+  ]
+}

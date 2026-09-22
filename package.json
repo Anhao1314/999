@@ -2,12 +2,14 @@
   "name": "flowcredit",
   "version": "0.0.0",
   "private": true,
-  "description": "FlowCredit — Personal AI Company OS. Persistent work kernel (Company, Work, Task, Artifact, Employee, Review, Repair, Founder Decision) with deterministic workforce coordination on Node's built-in SQLite. No model providers, no UI.",
+  "description": "FlowCredit — Personal AI Company OS. Persistent work kernel with deterministic workforce coordination and an optional employee lobby UI. No model providers.",
   "type": "module",
   "engines": {
     "node": ">=24.19.0 <25"
   },
   "scripts": {
+    "start:employees": "node scripts/start-employee-ui.mjs",
+    "test:employees": "node --test tests/unit/employee-domain.test.mjs tests/unit/employee-adapter.test.mjs tests/integration/employee-http.test.mjs",
     "test": "node --test",
     "check": "node scripts/check.mjs"
   }
