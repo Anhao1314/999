@@ -248,6 +248,11 @@ node apps/runtime/server.mjs        # 以长期进程方式启动 Kernel
 等配置，见 [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md)）。
 零运行时依赖：adapter 通过子进程调用操作者本机已安装的 Codex CLI，不引入 SDK。
 
+CI：GitHub Actions 的 `FlowCredit CI`（`.github/workflows/ci.yml`）在 `pull_request` 与 push 到
+`main` 时运行 `node scripts/check.mjs` 与 `node --test`（Node 版本取自 `.nvmrc`，权限仅
+`contents: read`，无密钥、无网络模型调用）。CI 只是回归保护，不是 provider 验证：
+真实 Codex 证据（H1 / H1.1）仍需手动运行，见上面的命令。
+
 ## Relationship to the old worklab repository
 
 旧的 `FlowCredit-worklab` 系仓库（含其 worktree）**不再是产品主线**。它们的角色是：
