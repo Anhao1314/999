@@ -1,0 +1,23 @@
+{
+  "name": "relay-code-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "Relay Code",
+  "description": "Relay Code desktop shell for the FlowCredit Runtime.",
+  "type": "module",
+  "main": "src/main.mjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "test": "node --test ../../tests/unit/desktop-runtime-lifecycle.test.mjs ../../tests/unit/desktop-shell-freeze.test.mjs",
+    "spike:electron": "env -u ELECTRON_RUN_AS_NODE electron scripts/electron-sqlite-spike.mjs",
+    "icon": "node scripts/generate-icon.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.4.3"
+  }
+}

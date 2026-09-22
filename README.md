@@ -147,6 +147,7 @@ Deliveries 与 Company Pulse 全部来自 `GET /experience/companies/:id/workspa
   [Workforce Experience v0](docs/contracts/workforce-experience-v0.md)
   · [Employee Lobby v0](docs/contracts/employee-lobby-v0.md)
   · [Founder Workspace v0](docs/contracts/founder-workspace-v0.md)
+  · [Relay Code Desktop v0](docs/contracts/relay-code-desktop-v0.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
@@ -243,6 +244,22 @@ Founder = Authority · Work = Continuity · Runtime = Control · Semantic Sensor
 - `FLOWCREDIT_WORKSPACE_UI=0` 禁用产品主页静态页面；原有 Kernel 路由与 `/employees` 不受影响。
 - `npm run test:workspace` 运行工作台单元与 HTTP 集成测试。行为契约见
   [Founder Workspace v0](docs/contracts/founder-workspace-v0.md)。
+
+### Relay Code Desktop（macOS Shell）
+
+`apps/desktop` 是 Relay Code 的 Electron 外部产品壳：Desktop Shell 只拥有自己的窗口、单实例与
+Runtime 子进程生命周期，不拥有 Company truth。固定 `electron@44.4.3`，其内置 Node `24.21.0`
+满足仓库 Node `>=24.19.0 <25`，并已在真实 Electron main process 中验证 `node:sqlite`。
+
+- `npm run start:desktop` 启动开发态窗口，自动加载动态 loopback 端口上的 `/workspace`；同源
+  `/employees` 导航保持可用。
+- `npm run package:desktop` 生成 `apps/desktop/dist/Relay Code-darwin-<arch>/Relay Code.app`；Runtime
+  源码和 `RelayCode.icns` 都进入 app bundle，外部产品名是 Relay Code，内部 Runtime 仍叫 FlowCredit。
+- Runtime 持久状态写入 `app.getPath("userData")/runtime`，退出时由 Desktop Shell 发送 SIGTERM 并等待
+  Runtime 收口；Bundle ID 为 `com.flowcredit.relaycode`。
+- 启动就绪 = Runtime ready line + `/health` 探针；开发态状态隔离在 `userData/runtime-dev`。
+- 该 build 未签名、未公证，仅用于本地开发验证；Finder 启动下的真实 Codex 发现尚未验证。
+  契约见 [Relay Code Desktop v0](docs/contracts/relay-code-desktop-v0.md)。
 
 要求 Node **24.19.0**（`.nvmrc`）。
 

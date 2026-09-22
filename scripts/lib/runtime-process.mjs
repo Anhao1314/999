@@ -33,6 +33,9 @@ export async function startRuntime({
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
+      ...(process.env.ELECTRON_RUN_AS_NODE
+        ? { ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE }
+        : {}),
       FLOWCREDIT_PORT: "0",
       FLOWCREDIT_RUNTIME_DIR: dir,
       FLOWCREDIT_COORDINATION: coordination ? "driver" : "off",
