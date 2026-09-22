@@ -1,4 +1,20 @@
 import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
+
+// Optional bounded env dump: the Desktop-facing tests use it to prove which
+// process configuration the shell actually handed to the Runtime.
+const envDump = process.env.RELAY_CODE_FIXTURE_ENV_DUMP;
+if (envDump)
+  writeFileSync(
+    envDump,
+    JSON.stringify({
+      FLOWCREDIT_COORDINATION: process.env.FLOWCREDIT_COORDINATION ?? null,
+      FLOWCREDIT_WORKER_BACKEND: process.env.FLOWCREDIT_WORKER_BACKEND ?? null,
+      FLOWCREDIT_CODEX_BIN: process.env.FLOWCREDIT_CODEX_BIN ?? null,
+      FLOWCREDIT_CODEX_REPO: process.env.FLOWCREDIT_CODEX_REPO ?? null,
+    }),
+    "utf8",
+  );
 
 // Minimal stand-in for the FlowCredit Runtime transport: it prints the ready
 // line the real server prints and answers /health. Set

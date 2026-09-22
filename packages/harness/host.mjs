@@ -209,6 +209,18 @@ export function createWorkerHost({
     }
     handles.set(run.id, handle);
 
+    // A stop can begin while this attempt is still starting: the adapter is
+    // provisioning a workspace and has spawned nothing when the Host's stop
+    // sweep runs. Ownership is completed here too, so a handle registered
+    // after that sweep is cancelled by the executor that created it. The
+    // handle is registered before this check and the check precedes the next
+    // await, so neither order can leave an attempt unclaimed.
+    if (stopped) {
+      await safeCancel(handle, "HOST_STOPPING");
+      report(run.id, run.generation, HOST_STATUS.CANCELLED, { reason: "HOST_STOPPING" });
+      return;
+    }
+
     const observed = [];
     let eventsError = null;
     const drain = (async () => {
@@ -450,7 +462,11 @@ export function createWorkerHost({
       stopped = true;
       observing = false;
       kernel.setWorkerRunObserver(null);
-      for (const handle of handles.values()) await safeCancel(handle, "HOST_STOPPING");
+      // Ownership stays here: the Host cancels every attempt it is holding,
+      // in parallel, and waits for each adapter to confirm that its child is
+      // gone. A stopping Host therefore leaves no execution running behind it,
+      // and the Desktop never has to look for processes to kill.
+      await Promise.all([...handles.values()].map((handle) => safeCancel(handle, "HOST_STOPPING")));
       await this.idle();
     },
     async idle() {

@@ -20,8 +20,18 @@
 //   the existing interruption vocabulary; the frozen Host has no verification
 //   seam of its own (recorded as a limitation, not redesigned).
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { BOUNDS, digestOf } from "../../work/records.mjs";
 import { newWorkerEvent } from "../events.mjs";
@@ -39,6 +49,11 @@ const MAX_STDERR_BYTES = 8192;
 const MAX_GIT_OUTPUT_BYTES = 512 * 1024;
 const MAX_CHANGED_FILES_RECORDED = 50;
 const MAX_STDOUT_REMAINDER_BYTES = 1024 * 1024;
+
+// Bounded wait for a SIGKILLed child to be reported gone by the kernel, on top
+// of the configured SIGTERM grace. Cancellation never returns before this
+// bound, so a WorkerHost stop cannot leave an unreaped orphan behind.
+const CANCEL_SIGKILL_WAIT_MS = 2000;
 
 // The adapter's honest self-description: what the backend actually enforces,
 // never what someone wished it enforced.
@@ -142,6 +157,41 @@ async function gitOrFail(cwd, args, what) {
       )}`,
     );
   return result;
+}
+
+// The narrow, provider-specific executable seam this backend accepts. An
+// absolute path is the only shape allowed: no PATH search, no shell parsing,
+// no argv embedded in a string, no profile sourcing. The resolved real path
+// is what callers spawn, so a package-manager or app-bundle symlink stays
+// legal while a regular non-executable file or a directory never is.
+export function validateCodexExecutablePath(value) {
+  const label = typeof value === "string" ? value.slice(0, 200) : String(value).slice(0, 200);
+  if (typeof value !== "string" || value.length === 0)
+    throw new Error("a Codex executable path must be a non-empty absolute path");
+  if (value.includes("\0") || /[\r\n]/.test(value))
+    throw new Error("a Codex executable path must not contain control characters");
+  if (!isAbsolute(value))
+    throw new Error(`the Codex executable path must be absolute: ${label}`);
+  let stats = null;
+  try {
+    stats = statSync(value);
+  } catch {
+    throw new Error(`the Codex executable does not exist: ${label}`);
+  }
+  if (!stats.isFile())
+    throw new Error(`the Codex executable is not a regular file: ${label}`);
+  try {
+    accessSync(value, fsConstants.X_OK);
+  } catch {
+    throw new Error(`the Codex executable is not executable: ${label}`);
+  }
+  let resolvedPath = null;
+  try {
+    resolvedPath = realpathSync(value);
+  } catch {
+    throw new Error(`the Codex executable path cannot be resolved: ${label}`);
+  }
+  return Object.freeze({ executablePath: value, resolvedPath });
 }
 
 export async function discoverCodexVersion({ codexCommand = DEFAULT_CODEX_COMMAND } = {}) {
@@ -506,22 +556,51 @@ export function createCodexExecAdapter(options = {}) {
     handle.signal.fire();
   }
 
-  function killProcess(handle) {
-    const child = handle.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  function childGone(child) {
+    return !child || child.exitCode !== null || child.signalCode !== null;
+  }
+
+  // Resolves true only when the child is known to be gone: either it already
+  // was, or the kernel reported its exit inside the bound. A timeout is not
+  // proof of termination, so the caller escalates instead of assuming.
+  function waitForChildExit(child, timeoutMs) {
+    if (childGone(child)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const settle = (exited) => {
+        clearTimeout(timer);
+        child.removeListener("exit", onExit);
+        resolve(exited);
+      };
+      const onExit = () => settle(true);
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      timer.unref?.();
+      child.once("exit", onExit);
+      if (childGone(child)) onExit();
+    });
+  }
+
+  // Ownership of termination sits here and nowhere else: this adapter kills
+  // exactly the one child it spawned (SIGTERM, then SIGKILL after the grace)
+  // and reports whether the child is confirmed gone. No caller — Desktop
+  // included — ever scans the OS for processes to kill.
+  async function terminateChild(child, graceMs) {
+    if (childGone(child)) return Object.freeze({ terminated: true, escalated: false });
     try {
       child.kill("SIGTERM");
     } catch {
       // best effort
     }
-    const timer = setTimeout(() => {
-      try {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      } catch {
-        // best effort
-      }
-    }, cancellationGraceMs);
-    timer.unref?.();
+    if (await waitForChildExit(child, graceMs))
+      return Object.freeze({ terminated: true, escalated: false });
+    try {
+      if (!childGone(child)) child.kill("SIGKILL");
+    } catch {
+      // best effort
+    }
+    return Object.freeze({
+      terminated: await waitForChildExit(child, CANCEL_SIGKILL_WAIT_MS),
+      escalated: true,
+    });
   }
 
   async function finalize(handle, code, signal) {
@@ -798,43 +877,52 @@ export function createCodexExecAdapter(options = {}) {
     },
 
     cancel(handle, reason) {
-      // Idempotent by contract: a second cancel is a no-op, and cancelling an
-      // already-finished execution is legal.
-      if (!handle || handle.cancelled) return;
+      // Idempotent by contract: a second cancel is a no-op that resolves with
+      // the first one, and cancelling an already-finished execution is legal.
+      // The returned promise is the termination receipt: it resolves only
+      // after this attempt's child is confirmed gone, so a WorkerHost stop
+      // cannot leave an unreported orphan behind (contract §12, §15).
+      if (!handle) return undefined;
+      if (handle.cancelled) return handle.cancellation;
       handle.cancelled = true;
       handle.cancelReason = bound(reason ?? null, 200);
-      if (handle.finished) return;
-      killProcess(handle);
-      const terminal = { terminalStatus: "CANCELLED", reason: handle.cancelReason };
-      const observation = buildObservation(handle, {
-        processEvidence: {
-          pid: handle.pid,
-          exitCode: null,
-          signal: null,
-          durationMs: now() - handle.startedAt,
-          cancelled: true,
-          cancelReason: handle.cancelReason,
-        },
-        gitEvidence: Object.freeze({
-          baseRevision: handle.baseSha,
-          head: null,
-          headUnchanged: null,
-          statusTruncated: false,
-          changedFileCount: null,
-          changedFiles: Object.freeze([]),
-          diffText: null,
-          diffDigest: null,
-          diffBytes: null,
-          notCollected: "the attempt was cancelled before independent evidence collection",
-        }),
-        protectedResult: Object.freeze({ checked: protectedList, violated: Object.freeze([]) }),
-        verificationResult: Object.freeze({ status: "SKIPPED", command: Object.freeze([]), exitCode: null, signal: null, passed: null, timedOut: false, durationMs: 0, summary: "the attempt was cancelled" }),
-        result: { method: "NO_CANDIDATE", rawDigest: null, candidateReason: "the attempt was cancelled" },
-        terminal,
-      });
-      observations.set(handle.workerRunId, observation);
-      persistEvidence(handle, observation);
-      settle(handle, terminal);
+      handle.cancellation = (async () => {
+        if (handle.finished) return;
+        const termination = await terminateChild(handle.child, cancellationGraceMs);
+        const terminal = { terminalStatus: "CANCELLED", reason: handle.cancelReason };
+        const observation = buildObservation(handle, {
+          processEvidence: {
+            pid: handle.pid,
+            exitCode: handle.child?.exitCode ?? null,
+            signal: handle.child?.signalCode ?? null,
+            durationMs: now() - handle.startedAt,
+            cancelled: true,
+            cancelReason: handle.cancelReason,
+            terminationConfirmed: termination.terminated,
+            escalatedToSigkill: termination.escalated,
+          },
+          gitEvidence: Object.freeze({
+            baseRevision: handle.baseSha,
+            head: null,
+            headUnchanged: null,
+            statusTruncated: false,
+            changedFileCount: null,
+            changedFiles: Object.freeze([]),
+            diffText: null,
+            diffDigest: null,
+            diffBytes: null,
+            notCollected: "the attempt was cancelled before independent evidence collection",
+          }),
+          protectedResult: Object.freeze({ checked: protectedList, violated: Object.freeze([]) }),
+          verificationResult: Object.freeze({ status: "SKIPPED", command: Object.freeze([]), exitCode: null, signal: null, passed: null, timedOut: false, durationMs: 0, summary: "the attempt was cancelled" }),
+          result: { method: "NO_CANDIDATE", rawDigest: null, candidateReason: "the attempt was cancelled" },
+          terminal,
+        });
+        observations.set(handle.workerRunId, observation);
+        persistEvidence(handle, observation);
+        settle(handle, terminal);
+      })();
+      return handle.cancellation;
     },
 
     observationFor(workerRunId) {

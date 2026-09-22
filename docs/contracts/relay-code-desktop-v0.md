@@ -95,10 +95,13 @@ simulated window chrome or custom drag regions to maintain.
 
 - Desktop v0 is an unsigned, unnotarized local development build. It makes no
   production distribution, notarization or auto-update claim.
-- The packaged app is smoke-tested with the Worker backend switched off. Real
-  Codex CLI discovery from a Finder launch is **not** proven:
-  `CODEX_BACKEND_FROM_DESKTOP=NOT_VERIFIED`. This is future work, not a Desktop
-  v0 correctness blocker.
+- Desktop v0 was smoke-tested with the Worker backend switched off, and real
+  Codex CLI discovery from a Finder launch was **not** proven at that time:
+  `CODEX_BACKEND_FROM_DESKTOP=NOT_VERIFIED`. That was accurate for the v0
+  slice. The later slice
+  [Desktop Worker Backend Discovery v0](desktop-worker-backend-discovery-v0.md)
+  proves LaunchServices discovery and real execution on one verified macOS
+  environment; it makes no claim for other machines or installation shapes.
 - macOS-first: only the darwin packaging path is implemented.
 
 ## Out of Scope

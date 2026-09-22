@@ -9,6 +9,12 @@ import { isRuntimeUrl, isSafeExternalUrl } from "./navigation-policy.mjs";
 import { desktopRuntimeDataDir } from "./desktop-paths.mjs";
 import { applicationMenuTemplate } from "./application-menu.mjs";
 import { RuntimeLifecycle } from "./runtime-lifecycle.mjs";
+import { describeDiscovery, discoverCodexBackend } from "./worker-backend-discovery.mjs";
+import {
+  boundedEnvironmentFacts,
+  describeEnvironmentFacts,
+  desktopRuntimeEnvironment,
+} from "./runtime-environment.mjs";
 
 const APP_NAME = "Relay Code";
 const BUNDLE_ID = "com.flowcredit.relaycode";
@@ -154,14 +160,19 @@ async function bootstrap() {
     throw new Error(`FlowCredit Runtime entry is missing: ${location.entry}`);
   }
 
+  // Discovery runs once per application session, before the Runtime starts,
+  // and answers one infrastructure question: is this backend executable
+  // locally available? It chooses nothing and grants nothing — the Runtime
+  // still owns Task, Assignment, WorkerRun and Permission.
+  log(`desktop-environment ${describeEnvironmentFacts(boundedEnvironmentFacts({ env: process.env }))}`);
+  const discovery = await discoverCodexBackend({ env: process.env });
+  log(`worker-backend-discovery ${describeDiscovery(discovery)}`);
+
   runtime = new RuntimeLifecycle({
     entry: location.entry,
     cwd: location.root,
     dataDir: runtimeDataDir(),
-    env: {
-      FLOWCREDIT_COORDINATION: process.env.FLOWCREDIT_COORDINATION ?? "off",
-      FLOWCREDIT_WORKER_BACKEND: process.env.FLOWCREDIT_WORKER_BACKEND ?? "off",
-    },
+    env: desktopRuntimeEnvironment({ env: process.env, discovery }),
     onUnexpectedExit: ({ code, signal }) => {
       log(`runtime-exited-unexpectedly code=${code ?? ""} signal=${signal ?? ""}`);
       void dialog
