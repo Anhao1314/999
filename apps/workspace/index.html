@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工作台 · FlowCredit</title><link rel="stylesheet" href="/workspace-assets/styles.css"></head>
+<body class="fc-workspace">
+<div class="fc-app" id="app" data-connection="CONNECTING" data-nav="workspace">
+<aside class="fc-sidebar"><a class="fc-brand" href="/workspace"><span class="fc-mark">F</span><span class="fc-brand-text">FlowCredit<small>COMPANY OS</small></span></a><nav class="fc-nav" id="nav" aria-label="主导航"></nav><div class="fc-side-foot">本机 Runtime · 单用户</div></aside>
+<header class="fc-topbar"><div class="fc-switcher"><label class="fc-sr" for="company">当前公司</label><select id="company"></select></div><button id="new-work" class="fc-btn fc-btn-primary" type="button" disabled>＋ 新建 Work</button><div class="fc-search"><input id="search" type="search" placeholder="搜索员工、工作或交付…" aria-label="搜索员工、工作或交付" autocomplete="off"><div id="search-results" class="fc-search-results" hidden></div></div><div class="fc-runtime" id="runtime-status" data-state="CONNECTING"></div><div class="fc-account" title="本机单用户 Runtime" aria-label="Founder 账户：本机单用户 Runtime">F</div></header>
+<main class="fc-canvas" id="canvas"><div class="fc-world" id="world"><div class="fc-canvas-content" id="canvas-content"></div></div><div class="fc-controls" id="controls" role="group" aria-label="画布显示控制"><button type="button" data-zoom="out" aria-label="缩小">−</button><span id="zoom-label">100%</span><button type="button" data-zoom="in" aria-label="放大">＋</button><span class="fc-controls-divider" aria-hidden="true"></span><button type="button" data-zoom="fit">适应</button><button type="button" data-zoom="reset">重置视图</button></div><section class="fc-attention" id="attention-panel" aria-label="需要你处理" hidden></section></main>
+<aside class="fc-inspector" id="inspector" data-open="false" aria-label="上下文检查器"><header class="fc-inspector-top"><span class="fc-eyebrow">INSPECTOR · 详情</span><button type="button" id="inspector-close" aria-label="关闭检查器">×</button></header><div class="fc-inspector-body" id="inspector-body"></div></aside>
+</div>
+<div class="fc-overlay" id="overlay" hidden></div>
+<script type="module" src="/workspace-assets/app.mjs"></script>
+</body></html>

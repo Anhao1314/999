@@ -31,6 +31,9 @@
 //         GET /works/:id/traces, GET /tasks/:id, GET /runs/:id,
 //         GET /reviews/:id, GET /artifacts/:id, GET /review-requests/:id,
 //         GET /repair-bindings/:id,
+//         GET / redirects to the Founder Workspace; GET /workspace and
+//         GET /workspace-assets/* serve the product homepage shell and its
+//         static files (no kernel; set FLOWCREDIT_WORKSPACE_UI=0 to disable),
 //         GET /experience/companies/:id/workspace, /experience/companies/:id/workforce,
 //         GET /experience/employees/:id, GET /experience/works/:id/lineage
 //           (Workforce Experience v0A: derived, bounded, GET-only product
@@ -54,6 +57,7 @@ import {
   projectWorkforceLobby,
 } from "../../packages/experience/index.mjs";
 import { createEmployeeRoutes, isLocalBrowserRequest } from "../employee/server.mjs";
+import { createWorkspaceRoutes } from "../workspace/server.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
 const PORT = Number(process.env.FLOWCREDIT_PORT ?? 0);
@@ -112,6 +116,11 @@ const COMMANDS = Object.freeze({
 
 const kernel = openKernel({ dir: DIR });
 const employeeRoutes = createEmployeeRoutes({ enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
+// Both product shells are static file servers inside this process: the Lobby
+// at /employees and the Founder Workspace at /workspace. Neither receives the
+// kernel; the browser reads the Experience API below.
+const workspaceUiEnabled = process.env.FLOWCREDIT_WORKSPACE_UI !== "0";
+const workspaceRoutes = createWorkspaceRoutes({ enabled: workspaceUiEnabled });
 // The host's choice, made once, visible in one place: whether this process lets
 // the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
 // this observer, and the deterministic NextActionProposer behind it.
@@ -235,6 +244,14 @@ async function handle(request, response) {
   const segments = url.pathname.split("/").filter(Boolean);
 
   if (await employeeRoutes(request, response, url)) return;
+  if (await workspaceRoutes(request, response, url)) return;
+
+  // No route ever lived at /; send the loopback visitor to the product home.
+  if (request.method === "GET" && url.pathname === "/" && workspaceUiEnabled) {
+    response.writeHead(302, { location: "/workspace", "cache-control": "no-store" });
+    response.end();
+    return;
+  }
 
   if (request.method === "GET" && url.pathname === "/health")
     return send(response, 200, {

@@ -11,7 +11,9 @@ FlowCredit 认识 Founder，帮助他建立自己的 AI 公司、招聘 AI 员�
 ## Current status
 
 **Foundation + Persistent Work Kernel v0A + Workforce Identity & Assignment v0B1 +
-Review / Repair Collaboration v0B2 + Founder Attention & Acceptance v0B3.**
+Review / Repair Collaboration v0B2 + Founder Attention & Acceptance v0B3 +
+Work Continuity v0B4 + Worker Harness v0 + CodexExecAdapter v1 +
+Workforce Experience v0A + Employee Lobby v0 + Founder Workspace v0C.**
 
 已实现的是一个不依赖任何模型 provider 的持久 Work Kernel：`Company` / `Work` /
 `Task` / `Artifact` / `Checkpoint` / `Activity` 在进程退出与重启后保持一致、可恢复，
@@ -128,8 +130,11 @@ truth 投影完全一致，未知 id 显式 404。Founder Attention 仍然只是
 Reviewer PASS 不会经由此层变成 ACCEPTED。Pixel Lobby（PR #1）已由 **Employee Lobby v0 集成**
 接入 Experience API 并合入 main（见下方与
 [Employee Lobby v0 契约](docs/contracts/employee-lobby-v0.md)）：大厅只是投影的只读客户端，
-唯一的 Founder 写操作是启用/停用员工。生产 Founder
-Workspace UI、Laya / Jev、General A2A 均未开始。
+唯一的 Founder 写操作是启用/停用员工。**Founder Workspace v0C** 把同一层投影接成产品主页
+`apps/workspace`（`/workspace`）：主 Work lineage、Needs You、AI Workforce、Recent
+Deliveries 与 Company Pulse 全部来自 `GET /experience/companies/:id/workspace` 的**单一投影**，
+每 ~2 秒整体替换；工作台自身**没有任何写路径**（`+ 新建 Work` 是诚实的禁用占位，ACCEPT 的
+执行属于 Founder Decision UI 里程碑）。Laya / Jev、General A2A 均未开始。
 
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
   [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md) ·
@@ -141,15 +146,16 @@ Workspace UI、Laya / Jev、General A2A 均未开始。
   [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md) ·
   [Workforce Experience v0](docs/contracts/workforce-experience-v0.md)
   · [Employee Lobby v0](docs/contracts/employee-lobby-v0.md)
+  · [Founder Workspace v0](docs/contracts/founder-workspace-v0.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
-- UI：Experience v0 只是 Founder Workspace / Employee Lobby 的只读投影后端，生产 UI 与
-  Canvas 尚未开始；已有可禁用的 AI 员工像素大厅与工牌 UI（见下方），现已由 Runtime 投影
-  驱动（LIVE 只读、状态 fail closed、`?demo=1` 为显式模拟）；
-  Laya / Jev、General A2A 未开始，Hiring / Genesis
-  未开始。协调由确定性的 Continuation Driver 完成（不是 scheduler / event bus / 持久队列）；
-  执行由 WorkerHost + `codex-exec` backend 完成（另有确定性的 test backend 用于测试）。
+- UI：Founder Workspace v0C 是产品主页（单一投影、LIVE 只读、无写路径、未完成区域为诚实占位）；
+  可禁用的 AI 员工像素大厅与工牌 UI 由同一层 Runtime 投影驱动（LIVE 只读、状态 fail closed、
+  `?demo=1` 为显式模拟）。Canvas 持久化、公司级 Activity、Founder Work 定义与 Founder
+  Decision UI、Hiring / Genesis、Laya / Jev、General A2A 均未开始。协调由确定性的
+  Continuation Driver 完成（不是 scheduler / event bus / 持久队列）；执行由 WorkerHost +
+  `codex-exec` backend 完成（另有确定性的 test backend 用于测试）。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
 都还没有实现——Kernel 只是它们共同的 Runtime 地基。真实模型执行已经接通
@@ -220,6 +226,24 @@ Founder = Authority · Work = Continuity · Runtime = Control · Semantic Sensor
 
 员工模块仍是本地单用户开发界面，未增加生产登录系统；Runtime 继续只绑定 loopback。
 
+### Founder Workspace（产品主页）
+
+`npm run start:workspace` 启动同一个 Runtime，默认访问 `http://127.0.0.1:4320/workspace`
+（根路径 `/` 会 302 到 `/workspace`）。沿用 `FLOWCREDIT_RUNTIME_DIR`、
+`FLOWCREDIT_COORDINATION`、`FLOWCREDIT_PORT`；不会自动创建公司、员工或任务。
+
+- LIVE 只读：整页内容来自 `GET /experience/companies/:id/workspace` 这一份投影（每 ~2 秒整体
+  替换），员工详情与工作线分别读 `/experience/employees/:id`、`/experience/works/:id/lineage`；
+  公司选择只用 `/companies` 发现身份，不从中派生运行状态。
+- 没有任何写路径：不 assign、不 start、不 review、不 accept；`+ 新建 Work` 是禁用占位
+  （Founder Work 定义里程碑接入）；Needs You 面板只读展示 Runtime 当前提供的 Founder 动作，
+  ACCEPT 的执行需要 Experience 投影先携带决策绑定（Founder Decision UI 里程碑）。
+- 失败语义：读不到 Runtime 时保留最后已知投影并明确标注“尚未刷新”，不回退演示数据；未完成
+  区域（Work 列表 / Hiring / Artifacts / Knowledge / Settings）是诚实占位，不虚构数据。
+- `FLOWCREDIT_WORKSPACE_UI=0` 禁用产品主页静态页面；原有 Kernel 路由与 `/employees` 不受影响。
+- `npm run test:workspace` 运行工作台单元与 HTTP 集成测试。行为契约见
+  [Founder Workspace v0](docs/contracts/founder-workspace-v0.md)。
+
 要求 Node **24.19.0**（`.nvmrc`）。
 
 ```sh
@@ -279,6 +303,8 @@ docs/contracts/   Persistent Work Kernel v0A 契约
                      prompt 编译、结果解析与独立 Harness 证据）
                    / Workforce Experience v0 契约（Runtime-backed read projections：Founder
                      Workspace / Employee Lobby 的派生只读产品模型与 GET 端点）
+                   / Founder Workspace v0 契约（Experience-backed 产品主页：单一投影、无写
+                     路径、诚实占位与已记录缺口）
 docs/migration/   旧仓库能力迁移清单与 provenance
 packages/         company（公司根对象）/ work（Work、Task、生命周期、协作、outcome 与
                   Continuation Policy 投影）/ decision（Founder Decision 记录）/
@@ -291,6 +317,9 @@ packages/         company（公司根对象）/ work（Work、Task、生命周�
                   experience（Workforce Experience v0：从 Runtime truth 派生的只读产品投影）
 apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam + Founder Attention 与
                   Workforce Experience 只读投影端点）
+apps/workspace/   产品主页静态壳与客户端（Experience 投影的只读呈现，无 kernel、无写路径）
+apps/employee/    AI 员工像素大厅与工牌静态壳（同一 Experience 投影的只读客户端；唯一 Founder
+                  写操作是启用/停用员工）
 fixtures/         种子数据（system workforce roster），不属于核心语言
 scripts/          check、重启演示、进程 harness 与 H1 真实执行场景
 tests/            smoke / 单元 / 集成测试（node --test）
