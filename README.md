@@ -125,10 +125,10 @@ Pulse）。availability 冻结为派生的 `AVAILABLE` / `WORKING` / `DISABLED`�
 `/experience/employees/:id`、`/experience/works/:id/lineage`。读投影不写任何东西、没有
 第二套 lifecycle、没有缓存、没有 Todo 表：读时从 Runtime truth 重新派生，重启后同一
 truth 投影完全一致，未知 id 显式 404。Founder Attention 仍然只是 Runtime projection；
-Reviewer PASS 不会经由此层变成 ACCEPTED。Pixel Lobby（PR #1）**尚未合并、尚未接入**
-Experience API 的缺口已由 Employee Lobby v0 集成填补（见下方与
+Reviewer PASS 不会经由此层变成 ACCEPTED。Pixel Lobby（PR #1）已由 **Employee Lobby v0 集成**
+接入 Experience API 并合入 main（见下方与
 [Employee Lobby v0 契约](docs/contracts/employee-lobby-v0.md)）：大厅只是投影的只读客户端，
-唯一的 Founder 写操作是启用/停用员工；该集成**尚未合并到 main**。生产 Founder
+唯一的 Founder 写操作是启用/停用员工。生产 Founder
 Workspace UI、Laya / Jev、General A2A 均未开始。
 
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
@@ -145,8 +145,8 @@ Workspace UI、Laya / Jev、General A2A 均未开始。
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
 - UI：Experience v0 只是 Founder Workspace / Employee Lobby 的只读投影后端，生产 UI 与
-  Canvas 尚未开始；已有可禁用的 AI 员工像素大厅与工牌 UI（见下方）：在集成分支上它已改为
-  Runtime 投影驱动（LIVE 只读、状态 fail closed、`?demo=1` 为显式模拟），尚未合并到 main；
+  Canvas 尚未开始；已有可禁用的 AI 员工像素大厅与工牌 UI（见下方），现已由 Runtime 投影
+  驱动（LIVE 只读、状态 fail closed、`?demo=1` 为显式模拟）；
   Laya / Jev、General A2A 未开始，Hiring / Genesis
   未开始。协调由确定性的 Continuation Driver 完成（不是 scheduler / event bus / 持久队列）；
   执行由 WorkerHost + `codex-exec` backend 完成（另有确定性的 test backend 用于测试）。
