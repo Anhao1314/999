@@ -20,6 +20,12 @@ import {
   latestArtifact,
   supersessionChain,
 } from "../work/collaboration.mjs";
+import { deriveWorkAttention, sortAttentionItems } from "../work/attention.mjs";
+import { deriveOutcome } from "../work/outcome.mjs";
+import {
+  FOUNDER_DECISION_DISPOSITIONS,
+  newFounderDecision,
+} from "../decision/decisions.mjs";
 import {
   BOUNDS,
   newActivityEvent,
@@ -329,6 +335,14 @@ export class WorkKernel {
 
   createTask({ workId, title, intent, requiredCapabilities } = {}) {
     const work = this.#requireWork(workId);
+    // Post-acceptance guard (v0B3 §10): an accepted Work is closed to new
+    // Tasks. Only a Founder Decision locks it — a Work that merely derives
+    // READY_FOR_DECISION is still open, and may still change under the Founder.
+    if (this.store.founderDecisionForWork(work.id))
+      throw kernelError(
+        "WORK_ACCEPTED_LOCKED",
+        `work ${work.id} has a Founder Decision; further work belongs to a new Work, not to this accepted one`,
+      );
     const task = newTask({
       workId: work.id,
       title: assertText(title, "title", BOUNDS.taskTitleMax),
@@ -1110,6 +1124,121 @@ export class WorkKernel {
     return { task: repairTask, repairBinding, assignment };
   }
 
+  // --- founder acceptance (v0B3) --------------------------------------------
+
+  // The Founder's ACCEPT: the one explicit human authority act of v0B3. It
+  // records what the Founder decided about an exact Artifact at an exact
+  // revision of the Work's reality — and nothing else. No Work status is
+  // stored, no Task changes, no Review is touched, no Knowledge is written.
+  // Contract: docs/contracts/founder-attention-acceptance-v0.md §8, §9.
+  //
+  // Every check that establishes current reality happens inside the
+  // transaction, so a decision can never be committed against a Work state
+  // that has already moved on. The idempotency check runs first, and before
+  // staleness: a retry of an identical decision is not a second decision.
+  acceptWork({ workId, artifactId, artifactDigest, basis } = {}) {
+    const work = assertId(workId, "workId");
+    const targetArtifactId = assertId(artifactId, "artifactId");
+    const digest = assertText(artifactDigest, "artifactDigest", BOUNDS.digestMax);
+    assertNoSecret(digest, "artifactDigest");
+    const inspectedBasis = assertInteger(basis, "basis", { min: 1 });
+
+    let decision = null;
+    let idempotent = false;
+    this.store.transaction(() => {
+      const existing = this.store.founderDecisionForWork(work);
+      if (existing) {
+        if (
+          existing.artifactId !== targetArtifactId ||
+          existing.artifactDigest !== digest ||
+          existing.basisSequence !== inspectedBasis
+        )
+          throw kernelError(
+            "WORK_ALREADY_DECIDED",
+            `work ${work} already carries a Founder Decision (${existing.disposition}) on artifact ${existing.artifactId} at basis ${existing.basisSequence}; a different decision is a new cycle of work, never a rewrite of history`,
+          );
+        decision = existing;
+        idempotent = true;
+        return;
+      }
+
+      const record = this.#requireWork(work);
+      const artifact = this.store.getArtifact(targetArtifactId);
+      if (
+        !artifact ||
+        artifact.workId !== record.id ||
+        artifact.companyId !== record.companyId
+      )
+        throw kernelError(
+          "DECISION_TARGET_MISMATCH",
+          `artifact ${targetArtifactId} is not an artifact of work ${record.id}`,
+        );
+      if (artifact.contentDigest !== digest)
+        throw kernelError(
+          "DECISION_TARGET_MISMATCH",
+          `artifact ${artifact.id} is recorded at digest ${artifact.contentDigest}, not ${digest}`,
+        );
+
+      const reads = this.#workReads(record);
+      // The same derivation the Founder read, checked again inside the
+      // transaction: a decision is validated against the projection it names.
+      const candidates = reads.outcome.candidateArtifacts;
+      if (candidates.length > 1)
+        throw kernelError(
+          "OUTCOME_AMBIGUOUS",
+          `work ${record.id} has ${candidates.length} current outcome candidates; the Runtime never picks one of them for the Founder`,
+        );
+      if (candidates.length === 0 || candidates[0].id !== artifact.id)
+        throw kernelError(
+          "ARTIFACT_NOT_CURRENT",
+          `artifact ${artifact.id} is not the current outcome candidate of work ${record.id}`,
+        );
+      if (reads.collaboration.status !== "READY_FOR_DECISION")
+        throw kernelError(
+          "WORK_NOT_READY_FOR_DECISION",
+          `work ${record.id} is ${reads.collaboration.status}; acceptance is a decision about a finished outcome`,
+        );
+
+      // The Founder must decide on the reality they inspected. The Work
+      // Activity head says which reality that is.
+      if (inspectedBasis < reads.decisionBasis)
+        throw kernelError(
+          "STALE_DECISION_BASIS",
+          `work ${record.id} moved on since basis ${inspectedBasis} (now ${reads.decisionBasis}); read the Work again before deciding`,
+        );
+      if (inspectedBasis > reads.decisionBasis)
+        throw kernelError(
+          "INVALID_DECISION_BASIS",
+          `basis ${inspectedBasis} is ahead of work ${record.id}'s current basis ${reads.decisionBasis}`,
+        );
+
+      decision = newFounderDecision({
+        companyId: record.companyId,
+        workId: record.id,
+        disposition: FOUNDER_DECISION_DISPOSITIONS.ACCEPT,
+        artifactId: artifact.id,
+        artifactDigest: artifact.contentDigest,
+        basisSequence: inspectedBasis,
+        createdAt: this.now(),
+      });
+      this.store.insertFounderDecision(decision);
+      this.#event({
+        companyId: record.companyId,
+        workId: record.id,
+        kind: EVENTS.WORK_ACCEPTED,
+        detail: {
+          decisionId: decision.id,
+          disposition: decision.disposition,
+          artifactId: decision.artifactId,
+          artifactDigest: decision.artifactDigest,
+          basisSequence: decision.basisSequence,
+        },
+      });
+    });
+
+    return { decision, work: this.workProjection(work), idempotent };
+  }
+
   // Generic, data-driven seed application: positions and employees with stable
   // ids. Idempotent — an identical redefinition is skipped, a conflicting one
   // fails instead of silently overwriting. The data itself lives outside the
@@ -1353,21 +1482,29 @@ export class WorkKernel {
     });
   }
 
+  // Founder Attention for a whole company: at most one item per Work, ordered
+  // by how urgently a human is actually needed. Nothing is stored and nothing
+  // is marked: there is no read flag, no dismissal and no second lifecycle,
+  // because "what needs me now" is a question about Runtime truth, and Runtime
+  // truth already knows the answer (v0B3 §11).
+  founderAttention({ companyId } = {}) {
+    const company = assertId(companyId, "companyId");
+    if (!this.store.getCompany(company))
+      throw kernelError("COMPANY_NOT_FOUND", `company ${company} does not exist`);
+    const items = [];
+    for (const work of this.store.listWorks(company)) {
+      const { item } = this.#workReads(work).founderAttention;
+      if (item) items.push(item);
+    }
+    return sortAttentionItems(items);
+  }
+
   // The Work projection: Work status is derived from Task truth, never stored.
   workProjection(id) {
     const work = this.#requireWork(id);
-    const tasks = this.store.listTasks(work.id);
-    const artifacts = this.store.listArtifacts({ workId: work.id });
-    const reviews = this.store.listReviews({ workId: work.id });
-    const reviewRequests = this.store.listReviewRequests({ workId: work.id });
-    const repairBindings = this.store.listRepairBindings({ workId: work.id });
-    const collaboration = deriveCollaboration({
-      tasks,
-      reviewRequests,
-      reviews,
-      repairBindings,
-      artifacts,
-    });
+    const reads = this.#workReads(work);
+    const { tasks, artifacts, reviews, reviewRequests, repairBindings, collaboration } =
+      reads;
     const latest = latestArtifact(artifacts);
     const taskCounts = {};
     for (const task of tasks)
@@ -1388,6 +1525,13 @@ export class WorkKernel {
       status: collaboration.status,
       stage: collaboration.stage,
       taskStatus: deriveWorkStatus(tasks),
+      // v0B3: what this Work's outcome is right now, and — when the Runtime
+      // offers no autonomous continuation and a legal Founder action exists —
+      // whether the Work is waiting on the Founder. Both are derived from
+      // truth; neither is stored, and reading them mutates nothing.
+      outcome: reads.outcome,
+      decisionBasis: reads.decisionBasis,
+      founderAttention: reads.founderAttention,
       collaboration: {
         outstanding: collaboration.outstanding,
         round: collaboration.round,
@@ -1412,6 +1556,9 @@ export class WorkKernel {
           title: task.title,
           generation: task.generation,
         })),
+      // v0B2 reading of the supersession chain: "the newest Artifact that
+      // nothing has replaced". It is never how an outcome is decided — a Work
+      // with two current candidates is AMBIGUOUS whichever one is newest.
       latestArtifact: latest
         ? {
             id: latest.id,
@@ -1485,6 +1632,62 @@ export class WorkKernel {
   }
 
   // --- internals ------------------------------------------------------------
+
+  // One instant of Work-scoped truth, read once and shared by every projection
+  // derived from it, so status, outcome, attention and basis can never describe
+  // three slightly different moments. All of it is derived here; none of it is
+  // stored.
+  #workReads(work) {
+    const tasks = this.store.listTasks(work.id);
+    const artifacts = this.store.listArtifacts({ workId: work.id });
+    const reviews = this.store.listReviews({ workId: work.id });
+    const reviewRequests = this.store.listReviewRequests({ workId: work.id });
+    const repairBindings = this.store.listRepairBindings({ workId: work.id });
+    const decision = this.store.founderDecisionForWork(work.id);
+    const decisionBasis = this.store.workActivityHead(work.id);
+    const requirementsByTask = new Map();
+    const assignmentsByTask = new Map();
+    for (const task of tasks) {
+      const requirements = this.store.getTaskRequirements(task.id);
+      if (requirements) requirementsByTask.set(task.id, requirements);
+      const assignment = this.store.currentAssignment(task.id);
+      if (assignment) assignmentsByTask.set(task.id, assignment);
+    }
+    const collaboration = deriveCollaboration({
+      tasks,
+      reviewRequests,
+      reviews,
+      repairBindings,
+      artifacts,
+    });
+    const outcome = deriveOutcome({ tasks, artifacts, decision });
+    const founderAttention = deriveWorkAttention({
+      work,
+      status: collaboration.status,
+      tasks,
+      reviewRequests,
+      repairBindings,
+      outcome,
+      decision,
+      employees: this.store.listEmployees(work.companyId),
+      positions: this.store.listPositions(work.companyId),
+      requirementsByTask,
+      assignmentsByTask,
+      decisionBasis,
+    });
+    return {
+      tasks,
+      artifacts,
+      reviews,
+      reviewRequests,
+      repairBindings,
+      decision,
+      decisionBasis,
+      collaboration,
+      outcome,
+      founderAttention,
+    };
+  }
 
   #requireWork(id) {
     const workId = assertId(id, "workId");

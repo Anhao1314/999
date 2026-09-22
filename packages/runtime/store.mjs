@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -223,6 +223,31 @@ CREATE TRIGGER IF NOT EXISTS repair_bindings_no_delete BEFORE DELETE ON repair_b
   BEGIN SELECT RAISE(ABORT,'REPAIR_BINDING_IMMUTABLE'); END;
 `;
 
+// v0B3 additions (schema v4): the Founder Decision — one immutable authority
+// act per Work — plus the Activity index the DecisionBasis read needs.
+const V4_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS founder_decisions(
+  id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  disposition TEXT NOT NULL CHECK (disposition IN ('ACCEPT')),
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  artifact_digest TEXT NOT NULL,
+  basis_sequence INTEGER NOT NULL CHECK (basis_sequence >= 1),
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS founder_decisions_one_per_work
+  ON founder_decisions(work_id);
+CREATE INDEX IF NOT EXISTS activity_by_work ON activity(work_id, sequence);
+`;
+
+const V4_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS founder_decisions_no_update BEFORE UPDATE ON founder_decisions
+  BEGIN SELECT RAISE(ABORT,'DECISION_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS founder_decisions_no_delete BEFORE DELETE ON founder_decisions
+  BEGIN SELECT RAISE(ABORT,'DECISION_IMMUTABLE'); END;
+`;
+
 const rowToCompany = (row) =>
   row && { id: row.id, name: row.name, createdAt: row.created_at };
 
@@ -386,6 +411,18 @@ const rowToActivity = (row) =>
     createdAt: row.created_at,
   };
 
+const rowToFounderDecision = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    disposition: row.disposition,
+    artifactId: row.artifact_id,
+    artifactDigest: row.artifact_digest,
+    basisSequence: row.basis_sequence,
+    createdAt: row.created_at,
+  };
+
 export class KernelStore {
   constructor(dir) {
     mkdirSync(dir, { recursive: true });
@@ -416,6 +453,8 @@ export class KernelStore {
     if (version === 1) this.transaction(() => this.#migrateV1ToV2());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 2)
       this.transaction(() => this.#migrateV2ToV3());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 3)
+      this.transaction(() => this.#migrateV3ToV4());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
     throw kernelError(
@@ -464,6 +503,15 @@ export class KernelStore {
         "ALTER TABLE task_requirements ADD COLUMN review_capabilities TEXT NOT NULL DEFAULT '[]'",
       );
     this.db.prepare("UPDATE schema_meta SET version=?").run(3);
+  }
+
+  // Explicit v3 → v4 migration: the Founder Decision table and the Activity
+  // index the DecisionBasis read uses. Purely additive: nothing is deleted,
+  // recreated or backfilled. A store that predates v0B3 simply has no
+  // decisions, and absence is how "no decision yet" is represented.
+  #migrateV3ToV4() {
+    this.db.exec(V4_TABLES_SQL + V4_TRIGGERS_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(4);
   }
 
   get schemaVersion() {
@@ -1029,6 +1077,58 @@ export class KernelStore {
   }
 
   // --- status ---------------------------------------------------------------
+  // --- founder decisions ----------------------------------------------------
+
+  insertFounderDecision(decision) {
+    this.db
+      .prepare(
+        "INSERT INTO founder_decisions(id,company_id,work_id,disposition,artifact_id,artifact_digest,basis_sequence,created_at) VALUES(?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        decision.id,
+        decision.companyId,
+        decision.workId,
+        decision.disposition,
+        decision.artifactId,
+        decision.artifactDigest,
+        decision.basisSequence,
+        decision.createdAt,
+      );
+    return decision;
+  }
+
+  getFounderDecision(id) {
+    return rowToFounderDecision(
+      this.db.prepare("SELECT * FROM founder_decisions WHERE id=?").get(id),
+    );
+  }
+
+  founderDecisionForWork(workId) {
+    return rowToFounderDecision(
+      this.db
+        .prepare("SELECT * FROM founder_decisions WHERE work_id=?")
+        .get(workId),
+    );
+  }
+
+  listFounderDecisions(companyId) {
+    return this.db
+      .prepare("SELECT * FROM founder_decisions WHERE company_id=? ORDER BY created_at, id")
+      .all(companyId)
+      .map(rowToFounderDecision);
+  }
+
+  // The Work's Activity head: the DecisionBasis. Every mutation that can change
+  // a Work's acceptance-relevant reality appends Work-scoped Activity in the
+  // same transaction, so this value identifies the reality a Founder inspected.
+  workActivityHead(workId) {
+    return (
+      this.db
+        .prepare("SELECT max(sequence) AS head FROM activity WHERE work_id=?")
+        .get(workId).head ?? 0
+    );
+  }
+
   counts() {
     const count = (table) =>
       this.db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
@@ -1045,6 +1145,7 @@ export class KernelStore {
       reviews: count("reviews"),
       reviewRequests: count("review_requests"),
       repairBindings: count("repair_bindings"),
+      founderDecisions: count("founder_decisions"),
       activity: count("activity"),
     };
   }

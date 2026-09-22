@@ -1,11 +1,11 @@
 # Migration manifest — from FlowCredit-worklab (v1)
 
-Status: **three extractions done — Persistent Work Kernel v0A, Workforce
-Identity & Assignment v0B1, Review & Repair Collaboration v0B2.** The table below
-tracks every legacy capability and its status; the §"Extraction …" sections
-record what was actually taken, from where, and why its shape changed. No legacy
-file was copied: every capability was written in this repository's own domain
-language.
+Status: **four extractions done — Persistent Work Kernel v0A, Workforce
+Identity & Assignment v0B1, Review & Repair Collaboration v0B2, Founder
+Attention & Acceptance v0B3.** The table below tracks every legacy capability and
+its status; the §"Extraction …" sections record what was actually taken, from
+where, and why its shape changed. No legacy file was copied: every capability was
+written in this repository's own domain language.
 
 Rule: **capability by capability, contract by contract, test by test.** Bulk copy
 (`cp -R`, whole `apps/` / `packages/` / `docs/` trees) is forbidden (see `AGENTS.md`).
@@ -30,9 +30,9 @@ being used as a migration source.
 | --- | --- | --- | --- | --- |
 | **Persistent Work substrate** (Duty/Task/Run/Checkpoint/Artifact/Budget) | A — `packages/control-plane/{runtime,store}.mjs`, `apps/runtime/server.mjs`; commit `0c8b023` + H0–H3 baseline | **extracted in v0A** — kernel only (Company/Work/Task/Artifact/Checkpoint/Activity). Budget, delegations and runs are *not* extracted | `packages/company` + `packages/work` + `packages/runtime` + `apps/runtime` (split by layer, not by file) | Extract the object semantics first (states, invariants, transitions), then re-implement against the new object model. `Duty` was deliberately **not** mapped to Company (see §Extraction v0A, item 1). |
 | **Repair loop** (REQUEST_REVISION → Repair Task → START_REPAIR → lineage) | A — commits `163ba6a`, `afc2658`, `80abacb`; tests `tests/integration/repair-loop.test.mjs` (13 tests), `tests/unit/review-scope.test.mjs`, `tests/support/revision-stub.mjs` | **extracted in v0B2** — immutable Review, Repair Task + RepairBinding lineage, Artifact supersession. A's human `START_REPAIR` gate and research state names did *not* migrate (see §Extraction v0B2) | `packages/workforce` (`reviews` / `review-requests` / `repair-bindings`), `packages/work/collaboration.mjs` (projection), `packages/runtime` (commands, storage) | **A is canonical.** B implemented the same milestone independently (`4a8bc0e`, +1239 test lines); do not merge both. Port A's semantics, then reconcile any B-only invariant as an explicit review item. |
-| **Founder Inbox** (pure projection of runtime conditions) | A — commit `27b11e7`; `apps/web/view-model.js` (`projectFounderInbox`), `tests/unit/inbox.test.mjs` | committed, validated | `packages/projections` + later Canvas Inbox module | Port the *classifier rules* (action-driven, not state-name-driven; id determinism; reading is not an exit) as a contract + tests. Keep the UI mapping out of the first extraction. |
+| **Founder Inbox** (pure projection of runtime conditions) | A — commit `27b11e7`; `apps/web/view-model.js:684` (`projectFounderInbox`), `tests/unit/inbox.test.mjs` | **extracted in v0B3** — as the pure classifier rules only; A's view-model layer and UI mapping did not migrate | `packages/work/attention.mjs` + `WorkKernel.founderAttention({ companyId })` | Port the *classifier rules* (action-driven, not state-name-driven; id determinism; reading is not an exit) as a contract + tests, and keep the UI mapping out — exactly as this row prescribed. See §Extraction v0B3 |
 | **Agent Identity** (stable system profiles) | A — commit `c2e1199`; `packages/agent-work/profiles.mjs`, `tests/unit/agent-identity.test.mjs` | **extracted in v0B1** | `packages/workforce` | Seed of MVP 2/3, done: the two system profiles became generic **Position + Employee** rows, and identity still comes from recorded runs, never from a role guess. A's `mission` / `outputContract` / `reviewPolicy` fields moved into this repository's *contract* vocabulary (`review_capabilities`), not into a profile object. |
-| **Founder Decision Closure** | A — **uncommitted** (`packages/control-plane/store.mjs` `resolve(disposition)`, `apps/runtime/server.mjs` disposition branch), test `tests/integration/decision-closure.test.mjs` | uncommitted work in progress | `packages/decision` (human decision record) | **Must be committed in A before extraction** (it exists only as working-tree state today). Policy: a decision is explicit or fails closed — nothing defaults to ACCEPT. |
+| **Founder Decision Closure** | A — **uncommitted** (`packages/control-plane/store.mjs:555` `resolve(disposition)`, `apps/runtime/server.mjs` disposition branch), test `tests/integration/decision-closure.test.mjs` | **extracted in v0B3** — read as *design evidence only*; A's code was never copied, and the source is still uncommitted in A | `packages/decision` (human decision record) + `founder_decisions` (schema v4) | The row's warning stands: the source exists only as working-tree state, so this extraction re-derived the semantics from the contract instead of porting them. Policy kept exactly: a decision is explicit or fails closed — nothing defaults to ACCEPT |
 | **Company Canvas Interaction Foundation** | A — **uncommitted** `apps/web/company-canvas/*` + `docs/company-canvas-ui-port-contract-v0.md`; tests `tests/unit/company-canvas-{contracts,interaction,projection}.test.mjs` | uncommitted, browser-verified | `apps/web` (future shell) + `docs/architecture` contract | Migrate the **contract** (slots, hooks, interaction arbitration, layout schema, projection boundary) and its tests — not the reference skin. Blocks MVP 1's "personalized Company Canvas" only after Genesis exists. |
 | **Decision Plane / Jev / reconciliation evidence** | B — commits `296661f`, `85625c6`, `19aaec8` + uncommitted `packages/decision-plane/*`, `packages/control-plane/jev-*.mjs`, `experiments/reconciliation/**` | research, shadow-only | `experiments/jev/` (never `packages/`) | **NOT a production migration.** The new Runtime must run with zero sensor dependencies. Future policy: `SemanticSensor → structured probability signal`, resolved from evidence, not from a hard `@typesafe-ai/sdk` import inside product packages. |
 | **Swarm Office** (pixel office visualization) | A/B/C — `apps/web/swarm-space/**` | demo, no runtime dependency | none (stays in the old repo) | **Do not migrate to product core.** If a demo is ever wanted, it returns as an explicitly labelled demo entry, never as product navigation. |
@@ -132,6 +132,45 @@ real-process hard restart in `tests/integration/restart.test.mjs` ("review and
 repair survive a hard restart without inventing a judgment"). The full
 collaboration is printed by `scripts/demo-review-repair-v0b2.mjs`.
 
+## Extraction v0B3 — Founder Attention & Acceptance
+
+Source: worktree **A**, branch `feat/persistent-repair-loop`, HEAD `27b11e7`, plus
+the **uncommitted** decision-closure work in A's working tree
+(`packages/control-plane/store.mjs:555` `resolve(disposition)`,
+`apps/runtime/server.mjs` disposition branch, test
+`tests/integration/decision-closure.test.mjs`). Nothing in A was modified.
+
+Because the decision-closure source is **uncommitted**, it was read as design
+evidence and re-derived from the contract rather than ported: this repository
+takes a shape from A only when the shape is committed and verified there, and the
+manifest records the gap instead of hiding it.
+
+| # | Invariant migrated | Old behaviour (source) | New behaviour (this repo) | Why the shape changed |
+| --- | --- | --- | --- | --- |
+| 1 | Attention is a derived projection, never a queue | `projectFounderInbox` computed items in a **web view-model**, next to the UI that rendered them (`apps/web/view-model.js:684`) | `packages/work/attention.mjs` is pure domain code with no storage; `WorkKernel.founderAttention({ companyId })` is the read, and `GET /companies/:id/attention` merely transports it | The old placement made "what needs the Founder" a property of the screen. Here it is a property of Runtime truth, so any later surface (Canvas, CLI, a notification) reads the same answer without a second store |
+| 2 | An item exists only if a real action exists | Items were classified from state names, and the UI decided what a click meant | The frozen normative question decides it: *can this Work continue correctly without Founder intervention under the Runtime that exists today?* No continuation + a proven legal action → item; otherwise a **diagnostic** in the Work projection | A state name is not an action. `COLLABORATION_BLOCKED`, `CAPABILITY_GAP`, `OUTCOME_AMBIGUOUS` and `NO_CANDIDATE` are visible on the Work and deliberately emit no item, because v0B3 has no legal exit for them |
+| 3 | Reading attention is not an exit | `tests/unit/inbox.test.mjs` already asserted that reading changes nothing | No `read`/`unread`/`done`/`dismissed`/`archived`/`resolved` field exists anywhere, and the regression test asserts that reading twice returns the same projection with identical row counts | The only way to keep "reading is not an exit" true forever is to have nothing to advance. There is no Inbox table to drift from Runtime truth |
+| 4 | Item identity is deterministic and derived | A's item ids were deterministic strings | `att:<KIND>:<workId>` — derived from the condition and the Work, stable across reads and restarts, bound to the Runtime's own identifiers | A stable id lets a UI diff two reads without storing anything, and makes "at most one item per Work" checkable rather than aspirational |
+| 5 | A decision is explicit, or it fails closed | A's uncommitted `resolve(disposition)` recorded a human disposition against a record | `acceptWork` is the only path: `founder_decisions` is append-only, immutable, one row per Work, `disposition` currently one word (`ACCEPT`) | Nothing defaults to ACCEPT, no escalation auto-accepts, and no other command can write a decision. The vocabulary stays one word until a second disposition has a consumer |
+| 6 | The decision binds an exact artifact at an exact basis | `resolve()` read the record at call time — "the decision is about that record" | `acceptWork` binds `artifact_id` + `artifact_digest` + `basis_sequence` (the Work's Activity head), re-read inside `BEGIN IMMEDIATE`; a moved-on Work is `STALE_DECISION_BASIS`, not a silent ACCEPT | v0B2 already proved that "the current artifact" drifts under repair. A decision is the Founder's claim about reality they inspected, so the runtime must be able to say *which* reality that was |
+| 7 | A wrong decision is answered by new work, never by rewriting history | The research loop could revisit a record in place | Storage triggers `founder_decisions_no_update` / `founder_decisions_no_delete` (`DECISION_IMMUTABLE`); a different decision is `WORK_ALREADY_DECIDED`, and new work on an accepted outcome belongs to a new Work (`WORK_ACCEPTED_LOCKED`) | Same rule v0A applies to Artifacts and v0B2 to Reviews. Immutability is what makes an authority act auditable |
+| 8 | Authority is separated from collaboration and from memory | A's loop fused review outcome and disposition (`HUMAN_REVIEW`), and accepting the record also admitted it to the research corpus | `Reviewer PASS ≠ Founder ACCEPT` (a PASS only reaches `READY_FOR_DECISION`), and `Founder ACCEPT ≠ Knowledge Admission` (the acceptance writes one decision row and one `WORK_ACCEPTED` event; there is no knowledge store here) | The three separations are product principles, not implementation details. Enforcing them in the schema is cheaper than enforcing them in a UI |
+
+Not migrated from A in v0B3: the view-model layer and any UI mapping
+(`apps/web/view-model.js`), the uncommitted disposition branch as *code*, A's
+research vocabulary and state names, and B's `decision-plane/contracts.mjs`.
+Founder Attention is deliberately **not** a second Task/Work lifecycle: no Inbox
+row, no dismissal, no acknowledgement, no escalation protocol, and no dispatcher.
+
+Evidence for v0B3: `tests/unit/founder-attention.test.mjs` (14 tests — the
+decision rule, the action audit, precedence, purity, and the DecisionBasis
+invariant), `tests/unit/founder-acceptance.test.mjs` (14 tests — binding, digest,
+ambiguity, staleness, idempotency, the post-acceptance guard and `ACCEPT` vs
+`ACCEPTED`), the v3 → v4 row in `tests/unit/schema-migration.test.mjs`, and the
+real-process hard restart in `tests/integration/restart.test.mjs` ("a Founder
+Decision survives a hard restart and is never re-adjudicated"). The whole path is
+printed by `scripts/demo-founder-acceptance-v0b3.mjs`.
+
 ## Provenance policy
 
 Every future extraction adds a row (or updates one) with:
@@ -148,8 +187,8 @@ code exist and what proved it worked".
 ## Known risks to resolve before extraction
 
 1. **Duplicate repair implementations (A vs B) — resolved for v0B2.** A is recorded as canonical and its repair semantics now pass in this repository (see §Extraction v0B2). Deleting the losing implementation in B is still open, and is the old repos' business, not this one's.
-2. **Duplicate decision semantics.** A's uncommitted `resolve(disposition)` and B's `decision-plane/contracts.mjs` describe overlapping human-decision states; the new `packages/decision` must be one of them, not both.
-3. **Uncommitted-only capabilities.** Decision closure and the Canvas foundation exist only in A's working tree. If A is ever cleaned, they are lost — commit them there first.
+2. **Duplicate decision semantics — resolved for v0B3.** A's uncommitted `resolve(disposition)` and B's `decision-plane/contracts.mjs` described overlapping human-decision states. v0B3 took A's policy (explicit, fail-closed, one disposition) and re-derived the record from the contract; B's decision plane is not used. Deleting the losing implementation in the old repositories remains their business, not this one's.
+3. **Uncommitted-only capabilities.** Decision closure and the Canvas foundation exist only in A's working tree. If A is ever cleaned, they are lost — commit them there first. v0B3 did not wait for that and did not copy it; the extraction it performed is recorded as contract-derived.
 4. **Research vocabulary leakage.** The strongest legacy code paths name Research concepts (claims, snapshots, memos). Extraction must rename them into the object model *before* porting behaviour, or the new product inherits the old mother tongue.
 
 ## Explicit non-goals for the next milestone

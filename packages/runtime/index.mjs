@@ -14,6 +14,28 @@ export {
   transitionsFrom,
 } from "../work/work.mjs";
 export { BOUNDS } from "../work/records.mjs";
+export {
+  COLLABORATION_STAGES,
+  COLLABORATION_STATUSES,
+  deriveCollaboration,
+} from "../work/collaboration.mjs";
+export { OUTCOME_STATES, currentOutcomeCandidates, deriveOutcome } from "../work/outcome.mjs";
+export {
+  ACTION_EFFECTS,
+  ATTENTION_ACTIONS,
+  ATTENTION_DIAGNOSTICS,
+  ATTENTION_KINDS,
+  attentionItemId,
+  deriveWorkAttention,
+  sortAttentionItems,
+} from "../work/attention.mjs";
+export {
+  FOUNDER_DECISION_DISPOSITIONS,
+  FOUNDER_DECISION_DISPOSITION_VALUES,
+  isFounderDecisionDisposition,
+  newFounderDecision,
+  newFounderDecisionId,
+} from "../decision/decisions.mjs";
 export { EVENTS, LEGACY_LIFECYCLE_KINDS } from "./events.mjs";
 export * from "../workforce/index.mjs";
 

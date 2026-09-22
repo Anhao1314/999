@@ -36,6 +36,7 @@ test("a fresh store initialises its schema and reports its version", () => {
       "reviews",
       "review_requests",
       "repair_bindings",
+      "founder_decisions",
     ])
       assert.ok(tables.includes(table), `missing table ${table}`);
     assert.deepEqual(kernel.status().counts, {
@@ -51,6 +52,7 @@ test("a fresh store initialises its schema and reports its version", () => {
       reviews: 0,
       reviewRequests: 0,
       repairBindings: 0,
+      founderDecisions: 0,
       activity: 0,
     });
   } finally {

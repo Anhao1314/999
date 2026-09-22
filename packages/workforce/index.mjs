@@ -17,6 +17,7 @@ export {
   newEmployeeId,
 } from "./employees.mjs";
 export { ASSIGNMENT_ID_PREFIX, newAssignment, newAssignmentId } from "./assignments.mjs";
+export { classifyEmployeeCandidates } from "./eligibility.mjs";
 export {
   TERMINAL_WORKER_RUN_STATES,
   WORKER_RUN_ID_PREFIX,

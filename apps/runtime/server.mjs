@@ -1,17 +1,20 @@
-// Minimal runtime process for the Persistent Work Kernel (v0A/v0B1/v0B2).
+// Minimal runtime process for the Persistent Work Kernel (v0A → v0B3).
 //
 // Purpose: prove the kernel can be hosted as a long-lived process, and give the
 // restart tests and the demonstrations a real process to kill. It is a kernel
-// transport, not a product API: no Founder decision endpoints yet, and no
-// projection layer — the UI milestone adds those, not this file.
+// transport, not a product API: it exposes the kernel's commands and its read
+// model as they already are, and adds no lifecycle of its own. A UI would
+// render these projections; this file is not one.
 //
 //   FLOWCREDIT_RUNTIME_DIR  store directory (default: ./.runtime/kernel)
 //   FLOWCREDIT_PORT         port on 127.0.0.1 (default: 0 = ephemeral)
 //
 // Routes: GET /health, GET /status, GET /companies, GET /companies/:id,
 //         GET /companies/:id/works, GET /companies/:id/positions,
-//         GET /companies/:id/employees, GET /employees/:id, GET /works/:id,
-//         GET /tasks/:id, GET /runs/:id,
+//         GET /companies/:id/employees, GET /companies/:id/attention,
+//         GET /employees/:id, GET /works/:id, GET /tasks/:id, GET /runs/:id,
+//         GET /reviews/:id, GET /artifacts/:id, GET /review-requests/:id,
+//         GET /repair-bindings/:id,
 //         POST /commands { command, input }.
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -41,6 +44,7 @@ const COMMANDS = Object.freeze({
   requestReview: (kernel, input) => kernel.requestReview(input),
   submitReview: (kernel, input) => kernel.submitReview(input),
   createRepairTask: (kernel, input) => kernel.createRepairTask(input),
+  acceptWork: (kernel, input) => kernel.acceptWork(input),
   bootstrapWorkforce: (kernel, input) => kernel.bootstrapWorkforce(input),
   recover: (kernel) => kernel.recover(),
 });
@@ -114,6 +118,11 @@ async function handle(request, response) {
 
   if (request.method === "GET" && segments[0] === "companies" && segments[2] === "employees")
     return send(response, 200, { employees: kernel.employees(segments[1]) });
+
+  if (request.method === "GET" && segments[0] === "companies" && segments[2] === "attention")
+    return send(response, 200, {
+      attention: kernel.founderAttention({ companyId: segments[1] }),
+    });
 
   if (request.method === "GET" && segments[0] === "companies" && segments.length === 2)
     return send(response, 200, { company: kernel.company(segments[1]) });

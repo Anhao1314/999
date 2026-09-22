@@ -198,3 +198,68 @@ export function startReviewRun(kernel, { reviewTaskId, reviewerId }) {
   kernel.assignTask({ taskId: reviewTaskId, employeeId: reviewerId, reason: "fixture" });
   return kernel.startWorkerRun({ taskId: reviewTaskId });
 }
+
+// Submit one review verdict: assign the reviewer, start the run, record the
+// judgment. A review is ordinary work, so it takes the ordinary path.
+export function reviewArtifact(
+  kernel,
+  { reviewTaskId, reviewerId, verdict, summary, findings = [] },
+) {
+  const run = startReviewRun(kernel, { reviewTaskId, reviewerId });
+  return kernel.submitReview({
+    reviewTaskId,
+    generation: run.generation,
+    verdict,
+    summary,
+    findings,
+  }).review;
+}
+
+// The whole v0B2 protocol, ending exactly where v0B3 begins: a Work that went
+// through a revision and a passing second review, leaving one current outcome
+// candidate and no Founder Decision. Nothing here is a shortcut — every step is
+// a public command.
+export function seedWorkReadyForDecision(kernel) {
+  const flow = seedTaskInReview(kernel);
+  const firstHandoff = kernel.requestReview({
+    taskId: flow.task.id,
+    generation: flow.generation,
+  });
+  const requested = reviewArtifact(kernel, {
+    reviewTaskId: firstHandoff.reviewTask.id,
+    reviewerId: flow.reviewer.id,
+    verdict: "REQUEST_REVISION",
+    summary: "The recommendation is not supported by the evidence supplied.",
+    findings: ["Add the downside case."],
+  });
+  const repair = kernel.createRepairTask({ reviewId: requested.id });
+  const repairRun = kernel.startWorkerRun({ taskId: repair.task.id });
+  const replacement = kernel.recordArtifact({
+    taskId: repair.task.id,
+    generation: repairRun.generation,
+    workerRunId: repairRun.workerRun.id,
+    supersedesArtifactId: flow.artifact.id,
+    kind: "document",
+    title: "Draft analysis v2",
+    content: "draft v2 with the downside case\n",
+  });
+  const secondHandoff = kernel.requestReview({
+    taskId: repair.task.id,
+    generation: repairRun.generation,
+  });
+  const passed = reviewArtifact(kernel, {
+    reviewTaskId: secondHandoff.reviewTask.id,
+    reviewerId: flow.reviewer.id,
+    verdict: "PASS",
+    summary: "The recommendation now matches the evidence supplied.",
+  });
+  return {
+    ...flow,
+    firstArtifact: flow.artifact,
+    artifact: replacement,
+    requested,
+    passed,
+    repair,
+    reviewTask: secondHandoff.reviewTask,
+  };
+}

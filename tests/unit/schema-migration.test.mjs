@@ -8,6 +8,7 @@ import { STORE_FILE_NAME } from "../../packages/runtime/index.mjs";
 import { tempStoreDir } from "../support/kernel.mjs";
 import { V1_SCHEMA_DDL } from "../support/schema-v1.mjs";
 import { V2_SCHEMA_DDL } from "../support/schema-v2.mjs";
+import { V3_SCHEMA_DDL } from "../support/schema-v3.mjs";
 
 const CREATED = "2026-09-20T10:00:00.000Z";
 const CHECKPOINT_STATE = { sections: ["intro", "risks"], progress: 0.5 };
@@ -78,13 +79,13 @@ function createV1Store(dir) {
   db.close();
 }
 
-test("a real v1 store migrates to v2 and keeps every value", () => {
+test("a real v1 store migrates through v2 and v3 to v4 and keeps every value", () => {
   const dir = tempStoreDir();
   try {
     createV1Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 3);
+    assert.equal(kernel.status().schemaVersion, 4);
     assert.deepEqual(kernel.company("cmp_legacy"), {
       id: "cmp_legacy",
       name: "Legacy Ltd",
@@ -148,7 +149,7 @@ test("a real v1 store migrates to v2 and keeps every value", () => {
 
     // Reopening a v2 store does not migrate again and loses nothing.
     const again = openKernel({ dir });
-    assert.equal(again.status().schemaVersion, 3);
+    assert.equal(again.status().schemaVersion, 4);
     assert.equal(again.status().counts.companies, 1);
     assert.equal(again.status().counts.artifacts, 1);
     assert.equal(again.workerRuns({ taskId: "tsk_legacy" }).length, 1);
@@ -235,13 +236,13 @@ function createV2Store(dir) {
   db.close();
 }
 
-test("a real v2 store migrates to v3 and keeps every v0B1 fact", () => {
+test("a real v2 store migrates through v3 to v4 and keeps every v0B1 fact", () => {
   const dir = tempStoreDir();
   try {
     createV2Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 3);
+    assert.equal(kernel.status().schemaVersion, 4);
     assert.deepEqual(kernel.position("pos_v0b1"), {
       id: "pos_v0b1",
       companyId: "cmp_v0b1",
@@ -341,7 +342,224 @@ test("a real v2 store migrates to v3 and keeps every v0B1 fact", () => {
   }
 });
 
-test("an unknown future schema version still fails clearly after v3 exists", () => {
+// A real v0B2 store: the shipped v3 schema, version 3, and the rows a v0B2
+// runtime would have written for a Work that went through review, a revision
+// and a passing second review. It ends at READY_FOR_DECISION with no Founder
+// Decision anywhere — which is exactly the state v0B3 must find it in.
+function createV3Store(dir) {
+  const db = new DatabaseSync(join(dir, STORE_FILE_NAME));
+  db.exec(V3_SCHEMA_DDL);
+  db.prepare("INSERT INTO schema_meta(version) VALUES(?)").run(3);
+  db.prepare("INSERT INTO companies(id,name,created_at) VALUES(?,?,?)").run(
+    "cmp_v0b2",
+    "Legacy Labs",
+    CREATED,
+  );
+  db.prepare("INSERT INTO positions(id,company_id,title,capabilities,created_at) VALUES(?,?,?,?,?)").run(
+    "pos_v0b2",
+    "cmp_v0b2",
+    "Producer",
+    JSON.stringify(["capability.produce"]),
+    CREATED,
+  );
+  db.prepare(
+    "INSERT INTO employees(id,company_id,position_id,display_name,enabled,provider_preference,created_at) VALUES(?,?,?,?,?,?,?)",
+  ).run("emp_v0b2", "cmp_v0b2", "pos_v0b2", "Legacy Producer", 1, null, CREATED);
+  db.prepare("INSERT INTO works(id,company_id,title,intent,created_at) VALUES(?,?,?,?,?)").run(
+    "wrk_v0b2",
+    "cmp_v0b2",
+    "Legacy work",
+    "Why it exists",
+    CREATED,
+  );
+  const insertTask = db.prepare(
+    "INSERT INTO tasks(id,work_id,title,intent,state,generation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+  );
+  for (const [id, title] of [
+    ["tsk_src", "Produce the output"],
+    ["tsk_rev1", "Review the output"],
+    ["tsk_rep", "Repair the output"],
+    ["tsk_rev2", "Review the repair"],
+  ])
+    insertTask.run(id, "wrk_v0b2", title, "One output", "COMPLETED", 1, CREATED, CREATED);
+  const insertRun = db.prepare(
+    "INSERT INTO worker_runs(id,company_id,work_id,task_id,employee_id,position_id,generation,state,work_packet,work_packet_digest,started_at,ended_at,end_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  for (const taskId of ["tsk_src", "tsk_rev1", "tsk_rep", "tsk_rev2"])
+    insertRun.run(
+      `run_${taskId}`,
+      "cmp_v0b2",
+      "wrk_v0b2",
+      taskId,
+      "emp_v0b2",
+      "pos_v0b2",
+      1,
+      "COMPLETED",
+      JSON.stringify({ packetVersion: 1, task: { id: taskId } }),
+      `sha256:packet-${taskId}`,
+      CREATED,
+      CREATED,
+      "WORK_COMPLETED",
+    );
+  const insertArtifact = db.prepare(
+    "INSERT INTO artifacts(id,company_id,work_id,task_id,generation,kind,title,content,content_digest,input_digest,created_at,worker_run_id,supersedes_artifact_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  insertArtifact.run(
+    "art_v1",
+    "cmp_v0b2",
+    "wrk_v0b2",
+    "tsk_src",
+    1,
+    "document",
+    "Legacy output v1",
+    "v1\n",
+    "sha256:v1",
+    null,
+    CREATED,
+    "run_tsk_src",
+    null,
+  );
+  insertArtifact.run(
+    "art_v2",
+    "cmp_v0b2",
+    "wrk_v0b2",
+    "tsk_rep",
+    1,
+    "document",
+    "Legacy output v2",
+    "v2\n",
+    "sha256:v2",
+    null,
+    CREATED,
+    "run_tsk_rep",
+    "art_v1",
+  );
+  const insertRequest = db.prepare(
+    "INSERT INTO review_requests(id,company_id,work_id,review_task_id,source_task_id,target_artifact_id,target_artifact_digest,created_at) VALUES(?,?,?,?,?,?,?,?)",
+  );
+  insertRequest.run("req_v1", "cmp_v0b2", "wrk_v0b2", "tsk_rev1", "tsk_src", "art_v1", "sha256:v1", CREATED);
+  insertRequest.run("req_v2", "cmp_v0b2", "wrk_v0b2", "tsk_rev2", "tsk_rep", "art_v2", "sha256:v2", CREATED);
+  const insertReview = db.prepare(
+    "INSERT INTO reviews(id,company_id,work_id,review_task_id,reviewer_worker_run_id,target_artifact_id,target_artifact_digest,verdict,summary,findings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  insertReview.run(
+    "rev_v1",
+    "cmp_v0b2",
+    "wrk_v0b2",
+    "tsk_rev1",
+    "run_tsk_rev1",
+    "art_v1",
+    "sha256:v1",
+    "REQUEST_REVISION",
+    "The downside case is missing.",
+    JSON.stringify(["Add the downside case."]),
+    CREATED,
+  );
+  insertReview.run(
+    "rev_v2",
+    "cmp_v0b2",
+    "wrk_v0b2",
+    "tsk_rev2",
+    "run_tsk_rev2",
+    "art_v2",
+    "sha256:v2",
+    "PASS",
+    "The recommendation now matches the evidence.",
+    JSON.stringify([]),
+    CREATED,
+  );
+  db.prepare(
+    "INSERT INTO repair_bindings(id,company_id,work_id,repair_task_id,review_id,source_task_id,target_artifact_id,target_artifact_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+  ).run("bnd_v1", "cmp_v0b2", "wrk_v0b2", "tsk_rep", "rev_v1", "tsk_src", "art_v1", "sha256:v1", CREATED);
+  const insertActivity = db.prepare(
+    "INSERT INTO activity(company_id,work_id,task_id,generation,kind,detail,created_at) VALUES(?,?,?,?,?,?,?)",
+  );
+  for (const [taskId, kind] of [
+    ["tsk_src", "task.created"],
+    ["tsk_src", "task.execution_started"],
+    ["tsk_src", "artifact.recorded"],
+    ["tsk_rev1", "REVIEW_REQUESTED"],
+    ["tsk_rev1", "REVIEW_SUBMITTED"],
+    ["tsk_rep", "REPAIR_TASK_CREATED"],
+    ["tsk_rep", "artifact.recorded"],
+    ["tsk_rev2", "REVIEW_REQUESTED"],
+    ["tsk_rev2", "REVIEW_SUBMITTED"],
+  ])
+    insertActivity.run("cmp_v0b2", "wrk_v0b2", taskId, 1, kind, "{}", CREATED);
+  db.close();
+}
+
+test("a real v3 store migrates to v4, keeps every v0B2 fact, and still has no decision", () => {
+  const dir = tempStoreDir();
+  try {
+    createV3Store(dir);
+    const kernel = openKernel({ dir });
+
+    assert.equal(kernel.status().schemaVersion, 4);
+    assert.equal(kernel.recovery.count, 0, "a finished v0B2 work hides no running attempt");
+
+    // Every v0B2 fact survived the migration untouched.
+    assert.equal(kernel.status().counts.reviews, 2);
+    assert.equal(kernel.status().counts.reviewRequests, 2);
+    assert.equal(kernel.status().counts.repairBindings, 1);
+    assert.equal(kernel.review("rev_v1").verdict, "REQUEST_REVISION");
+    assert.equal(kernel.review("rev_v2").verdict, "PASS");
+    assert.equal(kernel.review("rev_v2").targetArtifactId, "art_v2");
+    assert.equal(kernel.repairBinding("bnd_v1").targetArtifactId, "art_v1");
+    assert.equal(kernel.artifact("art_v1").supersedesArtifactId, null);
+    assert.equal(kernel.artifact("art_v2").supersedesArtifactId, "art_v1");
+
+    // Migration is additive: a v0B2 store arrives with no decision, and no
+    // backfill invents one. "No decision yet" is an absence, not a row.
+    assert.equal(
+      kernel.status().counts.founderDecisions,
+      0,
+      "a store with no history of a decision must not gain one",
+    );
+
+    const projection = kernel.workProjection("wrk_v0b2");
+    assert.equal(projection.status, "READY_FOR_DECISION");
+    assert.equal(projection.outcome.state, "READY");
+    assert.equal(projection.outcome.accepted, null);
+    assert.deepEqual(
+      projection.outcome.candidateArtifacts.map((entry) => entry.id),
+      ["art_v2"],
+      "the superseded v1 is not a candidate, and the newest is not chosen by recency",
+    );
+    assert.equal(
+      projection.decisionBasis,
+      9,
+      "the basis is the migrated Work's own activity head",
+    );
+    assert.equal(projection.founderAttention.item.kind, "DECISION_REQUIRED");
+
+    // The v0B3 decision path works on the migrated store, and the migrated
+    // activity history is what the basis was measured against.
+    const accepted = kernel.acceptWork({
+      workId: "wrk_v0b2",
+      artifactId: "art_v2",
+      artifactDigest: "sha256:v2",
+      basis: projection.decisionBasis,
+    });
+    assert.equal(accepted.idempotent, false);
+    assert.equal(accepted.decision.disposition, "ACCEPT");
+    assert.equal(accepted.work.outcome.state, "ACCEPTED");
+    assert.equal(accepted.work.outcome.accepted.artifactId, "art_v2");
+    kernel.close();
+
+    // Reopening migrates nothing again, and the decision is still there.
+    const reopened = openKernel({ dir });
+    assert.equal(reopened.status().schemaVersion, 4);
+    assert.equal(reopened.status().counts.founderDecisions, 1);
+    assert.equal(reopened.workProjection("wrk_v0b2").outcome.state, "ACCEPTED");
+    assert.equal(reopened.workProjection("wrk_v0b2").founderAttention.item, null);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown future schema version still fails clearly after v4 exists", () => {
   const dir = tempStoreDir();
   try {
     const db = new DatabaseSync(join(dir, STORE_FILE_NAME));

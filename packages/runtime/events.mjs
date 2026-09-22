@@ -23,6 +23,7 @@ export const EVENTS = Object.freeze({
   REVIEW_PASSED: "REVIEW_PASSED",
   REVISION_REQUESTED: "REVISION_REQUESTED",
   REPAIR_TASK_CREATED: "REPAIR_TASK_CREATED",
+  WORK_ACCEPTED: "WORK_ACCEPTED",
 });
 
 // Written by the v0A lifecycle and kept verbatim: old events must stay readable.
