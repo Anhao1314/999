@@ -56,6 +56,7 @@ export {
   DEFAULT_CODEX_COMMAND,
   createCodexExecAdapter,
   discoverCodexVersion,
+  validateCodexExecutablePath,
 } from "./adapters/codex-exec.mjs";
 export {
   CODEX_FINAL_MESSAGE_MAX_BYTES,

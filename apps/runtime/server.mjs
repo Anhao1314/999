@@ -21,8 +21,14 @@
 //                           and reads FLOWCREDIT_CODEX_BASE_REVISION,
 //                           FLOWCREDIT_CODEX_VERIFICATION (whitespace-separated
 //                           argv, default `node --test`),
-//                           FLOWCREDIT_CODEX_PROTECTED_PATHS (comma-separated)
-//                           and FLOWCREDIT_CODEX_EVIDENCE_DIR.
+//                           FLOWCREDIT_CODEX_PROTECTED_PATHS (comma-separated),
+//                           FLOWCREDIT_CODEX_EVIDENCE_DIR and FLOWCREDIT_CODEX_BIN.
+//                           FLOWCREDIT_CODEX_BIN, when set, names the exact
+//                           Codex executable as an absolute path: it is
+//                           validated and probed here, never parsed by a
+//                           shell, and this process exits rather than
+//                           running a backend it could not verify. Absent it,
+//                           `codex` is resolved through this process's PATH.
 //
 // Routes: GET /health, GET /status, GET /companies, GET /companies/:id,
 //         GET /companies/:id/works, GET /companies/:id/positions,
@@ -44,10 +50,12 @@ import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
 import { createContinuationDriver, openKernel } from "../../packages/runtime/index.mjs";
 import {
+  DEFAULT_CODEX_COMMAND,
   createCodexExecAdapter,
   createStaticWorkerBackendResolver,
   createWorkerHost,
   discoverCodexVersion,
+  validateCodexExecutablePath,
 } from "../../packages/harness/index.mjs";
 import { createTestWorkerAdapter } from "../../packages/harness/adapters/test-worker.mjs";
 import {
@@ -132,7 +140,25 @@ const driver = createContinuationDriver({ kernel, observe: COORDINATION === "dri
 //
 // codex-exec configuration is execution configuration, never Company truth:
 // a base repository to provision run worktrees from, the revision to stand on,
-// an independent verification command and the paths that must stay untouched.
+// an independent verification command, the paths that must stay untouched, and
+// the exact Codex executable this host was told to use. None of it is stored
+// as Employee identity and none of it grants anything: an available backend is
+// still only a backend.
+function resolveCodexCommand() {
+  const configured = process.env.FLOWCREDIT_CODEX_BIN;
+  if (configured === undefined || configured === null || configured === "")
+    return DEFAULT_CODEX_COMMAND;
+  try {
+    // Explicit configuration is absolute-path-only and fails closed: a bad
+    // override is never silently replaced by a PATH lookup.
+    const { resolvedPath } = validateCodexExecutablePath(configured);
+    return Object.freeze([resolvedPath]);
+  } catch (error) {
+    process.stderr.write(`FLOWCREDIT_CODEX_BIN is not usable: ${error?.message ?? error}\n`);
+    process.exit(1);
+  }
+}
+
 async function buildCodexExecWorkerHost() {
   const baseRepository = process.env.FLOWCREDIT_CODEX_REPO;
   if (!baseRepository) {
@@ -146,13 +172,26 @@ async function buildCodexExecWorkerHost() {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+  const codexCommand = resolveCodexCommand();
+  const backendVersion = await discoverCodexVersion({ codexCommand });
+  if (backendVersion === null) {
+    // A backend this process cannot execute is not a backend. Refusing here
+    // is cheaper and more honest than failing once per attempt later.
+    process.stderr.write(
+      `the configured Codex executable did not answer --version: ${codexCommand[0]}\n`,
+    );
+    process.exit(1);
+  }
   const adapter = createCodexExecAdapter({
+    codexCommand,
     baseRepository,
     verification: { command: verificationCommand },
     protectedPaths,
     evidenceDir: process.env.FLOWCREDIT_CODEX_EVIDENCE_DIR ?? null,
   });
-  const backendVersion = (await discoverCodexVersion()) ?? "unknown";
+  // Developer-facing, bounded, never rendered: the local engineering report
+  // needs to know which executable actually ran, and the Workspace must not.
+  process.stdout.write(`codex-exec backend executable=${codexCommand[0]} version=${backendVersion}\n`);
   return createWorkerHost({
     kernel,
     adapter,
@@ -417,16 +456,34 @@ server.listen(PORT, "127.0.0.1", () => {
   );
 });
 
+// A cancelled attempt writes nothing: whatever the Runtime still holds as
+// RUNNING is recovered on the next start, exactly like a crash. What must not
+// survive this process is the child: the WorkerHost stops first, and its
+// adapters confirm termination before the transport and the store close. The
+// bound is below the Desktop's own stop timeout, so a graceful quit finishes
+// here rather than falling through to a force-kill.
+const SHUTDOWN_TIMEOUT_MS = 8_000;
+
+function closeTransport() {
+  return new Promise((resolve) => {
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+    // Idle keep-alive connections (a polling Workspace tab) must not hold the
+    // shutdown open; in-flight requests are still allowed to finish.
+    server.closeIdleConnections?.();
+  });
+}
+
 function shutdown(signal) {
   process.stdout.write(`shutting down on ${signal}\n`);
-  server.close(() => {
-    // A cancelled attempt writes nothing: whatever the Runtime still holds as
-    // RUNNING is recovered on the next start, exactly like a crash.
-    const settle = workerHost ? workerHost.stop() : Promise.resolve();
-    settle.finally(() => {
-      kernel.close();
-      process.exit(0);
-    });
+  const settle = workerHost ? workerHost.stop() : Promise.resolve();
+  const budget = new Promise((resolve) => {
+    const timer = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  Promise.race([Promise.allSettled([settle, closeTransport()]), budget]).finally(() => {
+    kernel.close();
+    process.exit(0);
   });
 }
 

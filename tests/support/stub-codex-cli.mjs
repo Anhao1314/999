@@ -15,10 +15,19 @@ import { execFileSync } from "node:child_process";
 const args = process.argv.slice(2);
 const mode = process.env.FLOWCREDIT_STUB_MODE ?? "execution-ok";
 
+// Optional bounded process facts: shutdown tests use these to prove which
+// exact child belongs to a run and that it is gone afterwards.
+const pidDump = process.env.FLOWCREDIT_STUB_PID_DUMP;
+
 if (args.includes("--version")) {
   process.stdout.write("codex-cli 0.0.0-stub\n");
   process.exit(0);
 }
+
+// Only the attempt's own `exec` process records its pid. A `--version` probe
+// runs with the same environment and must never be mistaken for the child a
+// shutdown test is watching.
+if (pidDump) writeFileSync(pidDump, String(process.pid), "utf8");
 
 const valueOf = (flag) => {
   const index = args.indexOf(flag);

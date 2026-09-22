@@ -1,7 +1,11 @@
 # Contract — CodexExecAdapter v1 (the first real production Worker backend)
 
 **Status: implemented and H1/H1.1-verified (2026-09-22) against the local
-`codex-cli 0.154.0-alpha.6.2`.**
+`codex-cli 0.154.0-alpha.6.2`; that version is the historical H1 observation,
+not a pinned or enforced compatibility requirement (this contract declares no
+version gate). The current Desktop discovery observation is
+`codex-cli 0.155.0-alpha.9.2` —
+[Desktop Worker Backend Discovery v0](desktop-worker-backend-discovery-v0.md).**
 **Open evidence gap:** the real-Codex review → REQUEST_REVISION → repair →
 re-review chain has not yet been observed (§14); the Runtime protocol itself is
 covered by deterministic tests. This contract covers the adapter itself: how a
@@ -39,7 +43,9 @@ session id or the process.
 ## 2. Verified CLI facts (audited, not assumed)
 
 - Binary: the user's installed Codex CLI (resolved from `PATH`); the audit
-  recorded `codex-cli 0.154.0-alpha.6.2`.
+  recorded `codex-cli 0.154.0-alpha.6.2`. That is an observed H1 fact, not a
+  supported-version claim: the adapter checks only that `--version` answers, so
+  a newer local CLI is used as-is and no version range is enforced.
 - The adapter uses: `codex exec`, `--json` (JSONL on stdout), `--ephemeral`
   (no session reuse), `--color never`, `--cd <workspace>`,
   `--sandbox workspace-write`, `--output-schema <file>`,
