@@ -34,6 +34,7 @@ const REQUIRED_PATHS = [
   "docs/contracts/review-repair-collaboration-v0.md",
   "docs/contracts/founder-attention-acceptance-v0.md",
   "docs/contracts/work-continuity-v0.md",
+  "docs/contracts/worker-harness-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
   "packages/runtime/index.mjs",
   "apps/runtime/server.mjs",

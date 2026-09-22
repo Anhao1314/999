@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -287,6 +287,66 @@ CREATE TRIGGER IF NOT EXISTS continuation_traces_no_delete BEFORE DELETE ON cont
   BEGIN SELECT RAISE(ABORT,'CONTINUATION_TRACE_APPEND_ONLY'); END;
 `;
 
+
+// H0.2 / Worker Harness v0 additions (schema v6): the WorkerExecutionBinding —
+// one immutable record of where and how one WorkerRun attempt is executing.
+// Purely additive: a store that predates the Harness has no bindings, and
+// absence is how "this attempt never had a bound execution" is represented.
+// The binding is frozen by trigger: it is provenance, never a mutable lease
+// record. WorkspaceLease lifecycle is derived from WorkerRun state, not stored.
+const V6_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS worker_execution_bindings(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  worker_run_id TEXT NOT NULL UNIQUE REFERENCES worker_runs(id),
+  generation INTEGER NOT NULL CHECK (generation >= 0),
+  backend_type TEXT NOT NULL,
+  backend_version TEXT NOT NULL,
+  execution_profile_digest TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
+  scratch_root TEXT NOT NULL,
+  base_revision TEXT,
+  branch TEXT,
+  external_execution_ref TEXT,
+  external_session_ref TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS worker_execution_bindings_by_work
+  ON worker_execution_bindings(work_id, sequence);
+CREATE INDEX IF NOT EXISTS worker_execution_bindings_by_task
+  ON worker_execution_bindings(task_id, sequence);
+`;
+
+const V6_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS worker_execution_bindings_no_update BEFORE UPDATE ON worker_execution_bindings
+  BEGIN SELECT RAISE(ABORT,'WORKER_EXECUTION_BINDING_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS worker_execution_bindings_no_delete BEFORE DELETE ON worker_execution_bindings
+  BEGIN SELECT RAISE(ABORT,'WORKER_EXECUTION_BINDING_IMMUTABLE'); END;
+`;
+
+const rowToWorkerExecutionBinding = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    taskId: row.task_id,
+    workerRunId: row.worker_run_id,
+    generation: row.generation,
+    backendType: row.backend_type,
+    backendVersion: row.backend_version,
+    executionProfileDigest: row.execution_profile_digest,
+    workspaceRoot: row.workspace_root,
+    scratchRoot: row.scratch_root,
+    baseRevision: row.base_revision ?? null,
+    branch: row.branch ?? null,
+    externalExecutionRef: row.external_execution_ref ?? null,
+    externalSessionRef: row.external_session_ref ?? null,
+    createdAt: row.created_at,
+  };
+
 const rowToCompany = (row) =>
   row && { id: row.id, name: row.name, createdAt: row.created_at };
 
@@ -520,6 +580,8 @@ export class KernelStore {
       this.transaction(() => this.#migrateV3ToV4());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 4)
       this.transaction(() => this.#migrateV4ToV5());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 5)
+      this.transaction(() => this.#migrateV5ToV6());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
     throw kernelError(
@@ -584,6 +646,15 @@ export class KernelStore {
   #migrateV4ToV5() {
     this.db.exec(V5_TABLES_SQL + V5_TRIGGERS_SQL);
     this.db.prepare("UPDATE schema_meta SET version=?").run(5);
+  }
+
+  // Explicit v5 → v6 migration: the WorkerExecutionBinding table. Purely
+  // additive, nothing is deleted, recreated or backfilled. Every WorkerRun
+  // that predates the Harness keeps no binding, and no historical execution
+  // provenance is invented for it.
+  #migrateV5ToV6() {
+    this.db.exec(V6_TABLES_SQL + V6_TRIGGERS_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(6);
   }
 
   get schemaVersion() {
@@ -806,6 +877,36 @@ export class KernelStore {
       .map(rowToActivity);
   }
 
+  // The submission receipt of a WorkerRun, read from the append-only Activity
+  // stream. A delivery is rare, so filtering by kind first keeps this bounded
+  // by the number of deliveries rather than by the history of the company.
+  resultSubmissionForRun(workerRunId) {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM activity WHERE kind='WORKER_RESULT_SUBMITTED' ORDER BY sequence DESC",
+        )
+        .all()
+        .map(rowToActivity)
+        .find((event) => event.detail?.workerRunId === workerRunId) ?? null
+    );
+  }
+
+  // The Reviewer-delivery receipt of a WorkerRun, same append-only pattern and
+  // same bounded cost: one WorkerRun delivers either an artifact or a judgment,
+  // never both.
+  reviewResultSubmissionForRun(workerRunId) {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM activity WHERE kind='WORKER_REVIEW_RESULT_SUBMITTED' ORDER BY sequence DESC",
+        )
+        .all()
+        .map(rowToActivity)
+        .find((event) => event.detail?.workerRunId === workerRunId) ?? null
+    );
+  }
+
   // --- status ---------------------------------------------------------------
   // --- positions ------------------------------------------------------------
   insertPosition(position) {
@@ -960,12 +1061,13 @@ export class KernelStore {
     );
   }
 
-  listWorkerRuns({ taskId = null, employeeId = null, state = null } = {}) {
+  listWorkerRuns({ taskId = null, employeeId = null, workId = null, state = null } = {}) {
     const clauses = [];
     const values = [];
     for (const [column, value] of [
       ["task_id", taskId],
       ["employee_id", employeeId],
+      ["work_id", workId],
       ["state", state],
     ]) {
       if (value) {
@@ -993,6 +1095,63 @@ export class KernelStore {
       )
       .all(companyId)
       .map(rowToWorkerRun);
+  }
+
+  // --- worker execution bindings (Harness v0) -------------------------------
+  // One immutable binding per WorkerRun. The UNIQUE constraint on worker_run_id
+  // is the cardinality rule: an attempt cannot be rebound to another backend or
+  // another workspace.
+  insertWorkerExecutionBinding(binding) {
+    this.db
+      .prepare(
+        "INSERT INTO worker_execution_bindings(id,company_id,work_id,task_id,worker_run_id,generation,backend_type,backend_version,execution_profile_digest,workspace_root,scratch_root,base_revision,branch,external_execution_ref,external_session_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        binding.id,
+        binding.companyId,
+        binding.workId,
+        binding.taskId,
+        binding.workerRunId,
+        binding.generation,
+        binding.backendType,
+        binding.backendVersion,
+        binding.executionProfileDigest,
+        binding.workspaceRoot,
+        binding.scratchRoot,
+        binding.baseRevision,
+        binding.branch,
+        binding.externalExecutionRef,
+        binding.externalSessionRef,
+        binding.createdAt,
+      );
+    return binding;
+  }
+
+  getWorkerExecutionBindingByRun(workerRunId) {
+    return rowToWorkerExecutionBinding(
+      this.db
+        .prepare("SELECT * FROM worker_execution_bindings WHERE worker_run_id=?")
+        .get(workerRunId),
+    );
+  }
+
+  listWorkerExecutionBindings({ workId = null, taskId = null } = {}) {
+    const clauses = [];
+    const values = [];
+    for (const [column, value] of [
+      ["work_id", workId],
+      ["task_id", taskId],
+    ]) {
+      if (value) {
+        clauses.push(`${column}=?`);
+        values.push(value);
+      }
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM worker_execution_bindings${where} ORDER BY sequence`)
+      .all(...values)
+      .map(rowToWorkerExecutionBinding);
   }
 
   // --- reviews, review requests, repair bindings ----------------------------
@@ -1265,6 +1424,7 @@ export class KernelStore {
       repairBindings: count("repair_bindings"),
       founderDecisions: count("founder_decisions"),
       continuationTraces: count("continuation_traces"),
+      workerExecutionBindings: count("worker_execution_bindings"),
       activity: count("activity"),
     };
   }

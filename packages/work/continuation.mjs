@@ -23,6 +23,15 @@ import { TASK_STATES } from "./work.mjs";
 export const CONTINUATION_POLICY_VERSION = "v0b4.1";
 export const MAX_CONTINUATION_STEPS = 16;
 
+// The one autonomous-execution budget (Harness Slice 1.1 §J–§N): one initial
+// attempt plus at most two automatic retries per Task. The count is *derived*
+// from durable WorkerRun history — there is no stored retry counter, no retry
+// state on the Task and no reason-specific budget, so the policy is
+// deterministic and survives a restart for free. A COMPLETED Task is terminal
+// and the budget no longer matters; an exhausted INTERRUPTED Task is a Founder
+// question, never an infinite loop.
+export const MAX_AUTONOMOUS_ATTEMPTS_PER_TASK = 3;
+
 // The named situations. Each one maps to at most one legal action, so "what is
 // happening" and "what may happen next" can never disagree.
 export const BOUNDARIES = Object.freeze({
@@ -52,6 +61,7 @@ export const CONTINUATION_DIAGNOSTICS = Object.freeze({
   PLANNING_EXHAUSTED: "PLANNING_EXHAUSTED",
   CONTINUATION_LIMIT_REACHED: "CONTINUATION_LIMIT_REACHED",
   COLLABORATION_BLOCKED: "COLLABORATION_BLOCKED",
+  AUTO_RETRY_EXHAUSTED: "AUTO_RETRY_EXHAUSTED",
 });
 
 export const ACTION_RESULTS = Object.freeze({
@@ -168,6 +178,7 @@ export function deriveProgressBoundary({
   positions = [],
   activeEmployeeIds = [],
   reviewProducerByTask = new Map(),
+  workerRunsByTask = new Map(),
 } = {}) {
   const context = {
     requirementsByTask,
@@ -202,6 +213,26 @@ export function deriveProgressBoundary({
     const evaluated = evaluateTask(interrupted, context);
     const resume = evaluated.assignedEligible && evaluated.assignedDispatchable;
     const candidates = candidateView(evaluated.dispatch);
+    // The autonomous attempt budget is read from durable WorkerRun history, not
+    // from a trace and not from a counter: every autonomous attempt this Task
+    // ever made is a row that survives a restart. When the budget is spent, no
+    // deterministic continuation exists — restarting again would be a loop, so
+    // the Driver stops and the Founder decides (v0B3 attention).
+    const attempts = (workerRunsByTask.get(interrupted.id) ?? []).length;
+    if (attempts >= MAX_AUTONOMOUS_ATTEMPTS_PER_TASK)
+      return STOP(BOUNDARIES.INTERRUPTED, {
+        taskId: interrupted.id,
+        candidates,
+        diagnostic: {
+          code: CONTINUATION_DIAGNOSTICS.AUTO_RETRY_EXHAUSTED,
+          reason: `task ${interrupted.id} has already used ${attempts} attempts; this Runtime never starts another one automatically`,
+          evidence: {
+            taskId: interrupted.id,
+            attempts,
+            maxAutonomousAttempts: MAX_AUTONOMOUS_ATTEMPTS_PER_TASK,
+          },
+        },
+      });
     if (resume)
       return {
         boundary: BOUNDARIES.INTERRUPTED,

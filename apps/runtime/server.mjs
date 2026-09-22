@@ -28,6 +28,8 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
 import { createContinuationDriver, openKernel } from "../../packages/runtime/index.mjs";
+import { createWorkerHost, createStaticWorkerBackendResolver } from "../../packages/harness/index.mjs";
+import { createTestWorkerAdapter } from "../../packages/harness/adapters/test-worker.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
 const PORT = Number(process.env.FLOWCREDIT_PORT ?? 0);
@@ -38,6 +40,18 @@ const COORDINATION = process.env.FLOWCREDIT_COORDINATION ?? "off";
 if (!COORDINATION_MODES.includes(COORDINATION)) {
   process.stderr.write(
     `FLOWCREDIT_COORDINATION must be one of ${COORDINATION_MODES.join(" | ")} (got ${COORDINATION})\n`,
+  );
+  process.exit(1);
+}
+
+// The execution switch: `off` means this process coordinates but executes
+// nothing. `test-worker` runs the deterministic Worker Harness backend — it is
+// NOT a model and NOT intelligence; the real CodexExecAdapter is a later slice.
+const WORKER_BACKENDS = Object.freeze(["off", "test-worker"]);
+const WORKER_BACKEND = process.env.FLOWCREDIT_WORKER_BACKEND ?? "off";
+if (!WORKER_BACKENDS.includes(WORKER_BACKEND)) {
+  process.stderr.write(
+    `FLOWCREDIT_WORKER_BACKEND must be one of ${WORKER_BACKENDS.join(" | ")} (got ${WORKER_BACKEND})\n`,
   );
   process.exit(1);
 }
@@ -58,6 +72,8 @@ const COMMANDS = Object.freeze({
   assignTask: (kernel, input) => kernel.assignTask(input),
   startWorkerRun: (kernel, input) => kernel.startWorkerRun(input),
   completeWorkerRun: (kernel, input) => kernel.completeWorkerRun(input),
+  submitWorkerResult: (kernel, input) => kernel.submitWorkerResult(input),
+  interruptWorkerRun: (kernel, input) => kernel.interruptWorkerRun(input),
   requestReview: (kernel, input) => kernel.requestReview(input),
   submitReview: (kernel, input) => kernel.submitReview(input),
   createRepairTask: (kernel, input) => kernel.createRepairTask(input),
@@ -73,6 +89,21 @@ const kernel = openKernel({ dir: DIR });
 // the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
 // this observer, and the deterministic NextActionProposer behind it.
 const driver = createContinuationDriver({ kernel, observe: COORDINATION === "driver" });
+
+// The WorkerHost executes attempts the Runtime started; it never coordinates.
+// It is bound into this process with the same honesty as the coordination
+// switch: absent an explicit backend, nothing executes.
+const workerHost =
+  WORKER_BACKEND === "test-worker"
+    ? createWorkerHost({
+        kernel,
+        adapter: createTestWorkerAdapter(),
+        resolver: createStaticWorkerBackendResolver(),
+        runtimeRoot: DIR,
+        timeoutMs: Number(process.env.FLOWCREDIT_WORKER_TIMEOUT_MS ?? 30_000),
+      })
+    : null;
+if (workerHost) workerHost.start();
 
 function send(response, status, payload) {
   const body = JSON.stringify(payload);
@@ -242,16 +273,26 @@ server.listen(PORT, "127.0.0.1", () => {
         .map((entry) => entry.taskId)
         .join(", ")}\n`,
     );
+  if (workerHost) {
+    const { reconciled } = { reconciled: workerHost.reconcile() };
+    if (reconciled > 0)
+      process.stdout.write(`worker host reconciled ${reconciled} running attempt(s)\n`);
+  }
   process.stdout.write(
-    `FlowCredit runtime ready on http://127.0.0.1:${port} dir=${DIR}\n`,
+    `FlowCredit runtime ready on http://127.0.0.1:${port} dir=${DIR} coordination=${COORDINATION} worker=${WORKER_BACKEND}\n`,
   );
 });
 
 function shutdown(signal) {
   process.stdout.write(`shutting down on ${signal}\n`);
   server.close(() => {
-    kernel.close();
-    process.exit(0);
+    // A cancelled attempt writes nothing: whatever the Runtime still holds as
+    // RUNNING is recovered on the next start, exactly like a crash.
+    const settle = workerHost ? workerHost.stop() : Promise.resolve();
+    settle.finally(() => {
+      kernel.close();
+      process.exit(0);
+    });
   });
 }
 

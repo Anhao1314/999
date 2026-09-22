@@ -258,6 +258,22 @@ These are recorded in the Work projection and never emit an actionable item:
 | `OUTCOME_AMBIGUOUS` | v0B3 has no disambiguation protocol, and guessing is forbidden |
 | `NO_CANDIDATE` | defensive: a Work that is ready with nothing to accept has no legal exit |
 
+### Attempt-budget exhaustion (`AUTO_RETRY_EXHAUSTED`)
+
+An `INTERRUPTED` Task that spent its whole autonomous attempt budget
+(`MAX_AUTONOMOUS_ATTEMPTS_PER_TASK = 3`, counted from durable WorkerRun history)
+introduces **no new Task state, no stored counter and no Continuation Trace
+dependency**. Automatic continuation simply stops, so the ordinary
+`EXECUTION_INTERRUPTED` rule is evaluated against current truth in which no
+autonomous continuation remains: where an item is emitted it is still
+`EXECUTION_INTERRUPTED`, and it carries `AUTO_RETRY_EXHAUSTED` among its
+`conditions`; the Work projection also carries it as a diagnostic. The remaining
+actions change meaning accordingly — with a valid Assignment `RESUME_EXECUTION`
+`RESOLVES` (only an explicit Founder resume starts the Task again), while after
+exhaustion `ASSIGN_EMPLOYEE` only `ADVANCES`, because assigning no longer starts
+the Task by itself. Where no legal Founder action remains, it stays a diagnostic,
+exactly as above.
+
 ### Action audit
 
 Actions are advertised only where Runtime behaviour was verified:
@@ -282,8 +298,12 @@ Two continuations are Runtime-owned and therefore never Founder attention:
 - `REQUEST_REVISION` with deterministic Repair creation available
   (`createRepairTask`), which is why a `BLOCKED` Work at that instant is not an
   item.
-- nothing else. Interrupted execution stays Founder attention, because the
-  Runtime never restarts an attempt by itself.
+- nothing else in v0B3. Interrupted execution was Founder attention there,
+  because the v0B3 Runtime never restarted an attempt by itself; the
+  continuation milestone (v0B4) narrows this — within
+  `MAX_AUTONOMOUS_ATTEMPTS_PER_TASK` an interrupted execution continues by
+  itself, and once the budget is spent (`AUTO_RETRY_EXHAUSTED`, §12) the
+  condition returns to Founder attention.
 
 ## 14. Crash, retry, concurrency
 

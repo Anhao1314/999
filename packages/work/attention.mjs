@@ -16,6 +16,7 @@
 import { classifyEmployeeCandidates } from "../workforce/eligibility.mjs";
 import { deriveWorkforceDispatch } from "../workforce/dispatch.mjs";
 import { satisfiesCapabilities } from "../workforce/capabilities.mjs";
+import { MAX_AUTONOMOUS_ATTEMPTS_PER_TASK } from "./continuation.mjs";
 import { OUTCOME_STATES } from "./outcome.mjs";
 
 export const ATTENTION_KINDS = Object.freeze({
@@ -30,6 +31,7 @@ export const ATTENTION_DIAGNOSTICS = Object.freeze({
   NO_DISPATCHABLE_EMPLOYEE: "NO_DISPATCHABLE_EMPLOYEE",
   OUTCOME_AMBIGUOUS: "OUTCOME_AMBIGUOUS",
   NO_CANDIDATE: "NO_CANDIDATE",
+  AUTO_RETRY_EXHAUSTED: "AUTO_RETRY_EXHAUSTED",
 });
 
 export const ATTENTION_ACTIONS = Object.freeze({
@@ -80,6 +82,7 @@ export function deriveWorkAttention({
   assignmentsByTask = new Map(),
   reviewProducerByTask = new Map(),
   activeEmployeeIds = [],
+  attemptsByTask = new Map(),
   decisionBasis = null,
 } = {}) {
   const reviewTaskIds = new Set(reviewRequests.map((request) => request.reviewTaskId));
@@ -142,29 +145,57 @@ export function deriveWorkAttention({
     const interruptedTasks = [];
     const contendedTaskIds = [];
     const capabilityGapTaskIds = [];
+    const exhaustedTaskIds = [];
     let needsFounder = false;
     for (const task of interrupted) {
       const role = roleOf(task);
       const { assignedValid, assignedDispatchable, dispatch } = continuationFor(task);
       const dispatchable = dispatch.dispatchable;
+      // The autonomous attempt budget, read from durable WorkerRun history.
+      const attempts = attemptsByTask.get(task.id) ?? 0;
+      const exhausted = attempts >= MAX_AUTONOMOUS_ATTEMPTS_PER_TASK;
+      if (exhausted) exhaustedTaskIds.push(task.id);
       // Two deterministic continuations belong to the Runtime, not the Founder:
       // resume the usable Assignment, or hand the Task to the one Employee who
       // can take it. Neither becomes an Inbox item — and neither does an
-      // Employee being busy, which clears itself when a WorkerRun ends.
-      if (assignedValid && assignedDispatchable) continue;
-      if (!assignedValid && dispatchable.length === 1) continue;
+      // Employee being busy, which clears itself when a WorkerRun ends. Once
+      // the attempt budget is spent there is no autonomous continuation left,
+      // so even these become Founder questions.
+      if (!exhausted) {
+        if (assignedValid && assignedDispatchable) continue;
+        if (!assignedValid && dispatchable.length === 1) continue;
+      }
 
       const taskActions = [];
       let founderAction = null;
-      if (dispatchable.length > 1) {
-        // More than one Employee could take it and this Runtime never picks.
-        founderAction = action(ATTENTION_ACTIONS.ASSIGN_EMPLOYEE, ACTION_EFFECTS.RESOLVES, {
+      if (exhausted && assignedValid && assignedDispatchable) {
+        // The Runtime will not restart this attempt again; only an explicit
+        // Founder resume can, and it is the ordinary start command.
+        founderAction = action(ATTENTION_ACTIONS.RESUME_EXECUTION, ACTION_EFFECTS.RESOLVES, {
           taskId: task.id,
-          dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
         });
+      } else if (dispatchable.length > 1) {
+        // More than one Employee could take it and this Runtime never picks.
+        // Assigning is only a resolution while the Runtime may still start the
+        // Task itself; after exhaustion it merely advances the choice.
+        founderAction = action(
+          ATTENTION_ACTIONS.ASSIGN_EMPLOYEE,
+          exhausted ? ACTION_EFFECTS.ADVANCES : ACTION_EFFECTS.RESOLVES,
+          {
+            taskId: task.id,
+            dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
+          },
+        );
       } else if (dispatch.eligible.length === 0 && dispatch.disabledCapable.length > 0) {
         founderAction = action(ATTENTION_ACTIONS.ENABLE_EMPLOYEE, ACTION_EFFECTS.ADVANCES, {
           taskId: task.id,
+        });
+      } else if (exhausted && !assignedValid && dispatchable.length === 1) {
+        // Exactly one Employee could take it, but after exhaustion the Runtime
+        // no longer reassigns by itself: the Founder does it, then resumes.
+        founderAction = action(ATTENTION_ACTIONS.ASSIGN_EMPLOYEE, ACTION_EFFECTS.ADVANCES, {
+          taskId: task.id,
+          dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
         });
       } else if (dispatch.eligible.length > 0 || assignedValid) {
         // Eligible, but nothing is dispatchable: contention clears itself when
@@ -193,7 +224,9 @@ export function deriveWorkAttention({
         title: task.title,
         role,
         generation: task.generation,
-        resumable: assignedValid && assignedDispatchable,
+        resumeWithoutFounder: !exhausted && assignedValid && assignedDispatchable,
+        attempts,
+        automaticRetryExhausted: exhausted,
         dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
       });
     }
@@ -201,6 +234,19 @@ export function deriveWorkAttention({
     // deterministically resumable interruption must leave this section silent.
     if (needsFounder || contendedTaskIds.length > 0 || capabilityGapTaskIds.length > 0)
       conditions.push(ATTENTION_KINDS.EXECUTION_INTERRUPTED);
+    // Exhaustion is its own reason, stated in the item's conditions and in the
+    // projection: the Work did not stall by accident, its budget was spent.
+    if (exhaustedTaskIds.length > 0) {
+      conditions.push(ATTENTION_DIAGNOSTICS.AUTO_RETRY_EXHAUSTED);
+      diagnostics.push({
+        code: ATTENTION_DIAGNOSTICS.AUTO_RETRY_EXHAUSTED,
+        reason: `every autonomous continuation this Runtime allows was used (${MAX_AUTONOMOUS_ATTEMPTS_PER_TASK} attempts per Task); another attempt is a Founder decision`,
+        evidence: {
+          interruptedTaskIds: exhaustedTaskIds,
+          maxAutonomousAttempts: MAX_AUTONOMOUS_ATTEMPTS_PER_TASK,
+        },
+      });
+    }
     if (needsFounder)
       candidates.push({
         kind: ATTENTION_KINDS.EXECUTION_INTERRUPTED,

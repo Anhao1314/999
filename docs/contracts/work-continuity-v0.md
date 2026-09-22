@@ -249,17 +249,38 @@ Task, no consumed retry.
 ## 11. Founder Attention after the Driver
 
 - Attention is derived **exclusively from current Runtime truth**. It may not
-  read traces, and it may not depend on "the Driver previously stopped".
+  read traces, and it may not depend on "the Driver previously stopped". The
+  autonomous attempt budget it reads is durable WorkerRun history — one row per
+  attempt, surviving a restart — never a stored counter and never a trace.
+- The budget is `MAX_AUTONOMOUS_ATTEMPTS_PER_TASK = 3` (1 initial attempt + at
+  most 2 automatic retries; Worker Harness v0 §18):
+  - attempts < `MAX_AUTONOMOUS_ATTEMPTS_PER_TASK` → deterministic continuation
+    may still retry or reassign, so no unnecessary Founder item;
+  - attempts >= `MAX_AUTONOMOUS_ATTEMPTS_PER_TASK` and the Task is still
+    `INTERRUPTED` → automatic continuation stops (`AUTO_RETRY_EXHAUSTED`), and
+    current Runtime truth may produce Founder Attention.
 - `EXECUTION_INTERRUPTED` becomes an item only when **no deterministic
   continuation exists** and a legal Founder command resolves or advances it.
-  - resumable now (usable Assignment + dispatchable assignee) → **no item**
-  - exactly one dispatchable replacement → **no item** (the Driver reassigns)
-  - eligible but all busy → **no item**; diagnostic `NO_DISPATCHABLE_EMPLOYEE`
-  - more than one dispatchable replacement → **item** (`ASSIGN_EMPLOYEE`): the
-    Runtime refuses to choose
-  - only a disabled capable Employee → **item** (`ENABLE_EMPLOYEE`)
-  - no capable Employee at all → `CAPABILITY_GAP`; for an execution Task
-    `ABANDON_TASK` remains the honest exit
+  - below budget:
+    - resumable now (usable Assignment + dispatchable assignee) → **no item**
+      (the Driver resumes the attempt)
+    - exactly one dispatchable replacement → **no item** (the Driver reassigns)
+    - eligible but all busy → **no item**; diagnostic
+      `NO_DISPATCHABLE_EMPLOYEE`
+    - more than one dispatchable replacement → **item** (`ASSIGN_EMPLOYEE`,
+      `RESOLVES`): the Runtime refuses to choose
+  - at budget (`AUTO_RETRY_EXHAUSTED`; the Runtime restarts, reassigns and
+    enables nothing by itself any more):
+    - resumable now → **item** (`RESUME_EXECUTION`, `RESOLVES`: only an
+      explicit Founder resume starts the attempt again)
+    - exactly one dispatchable replacement → **item** (`ASSIGN_EMPLOYEE`,
+      `ADVANCES`: assigning no longer starts the Task by itself)
+    - more than one dispatchable replacement → **item** (`ASSIGN_EMPLOYEE`,
+      `ADVANCES`)
+  - independent of the budget:
+    - only a disabled capable Employee → **item** (`ENABLE_EMPLOYEE`)
+    - no capable Employee at all → `CAPABILITY_GAP`; for an execution Task
+      `ABANDON_TASK` remains the honest exit
 - `REPAIR_UNASSIGNABLE` and `DECISION_REQUIRED` keep their v0B3 semantics.
 - The `EXECUTION_INTERRUPTED` summary text changes, because the Runtime now does
   restart attempts: "Execution was interrupted, and this Runtime never restarts
@@ -317,7 +338,7 @@ New codes: `INVALID_PROPOSAL` (400) · `REVIEWER_NOT_INDEPENDENT` (409) ·
 
 Diagnostics (recorded in traces, never thrown): `NO_DISPATCHABLE_EMPLOYEE` ·
 `CAPABILITY_GAP` · `DISPATCH_AMBIGUOUS` · `PLANNING_EXHAUSTED` ·
-`CONTINUATION_LIMIT_REACHED` · `COLLABORATION_BLOCKED`.
+`CONTINUATION_LIMIT_REACHED` · `COLLABORATION_BLOCKED` · `AUTO_RETRY_EXHAUSTED`.
 
 ## 17. Storage: schema v4 → v5
 

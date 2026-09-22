@@ -17,6 +17,12 @@ export {
   newEmployeeId,
 } from "./employees.mjs";
 export { ASSIGNMENT_ID_PREFIX, newAssignment, newAssignmentId } from "./assignments.mjs";
+export {
+  WORKER_EXECUTION_BINDING_ID_PREFIX,
+  newWorkerExecutionBinding,
+  newWorkerExecutionBindingId,
+  sameExecutionBindingFacts,
+} from "./execution-bindings.mjs";
 export { classifyEmployeeCandidates } from "./eligibility.mjs";
 export {
   activeEmployeeIdsOf,

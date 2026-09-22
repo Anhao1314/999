@@ -30,6 +30,11 @@ export const BOUNDS = Object.freeze({
   reviewSummaryMax: 2000,
   reviewFindingMax: 1000,
   reviewFindingsMax: 50,
+  workerVerificationSummaryMax: 2000,
+  backendTypeMax: 64,
+  backendVersionMax: 64,
+  executionPathMax: 1024,
+  externalRefMax: 256,
 });
 
 export function newCheckpointId() {

@@ -80,13 +80,13 @@ function createV1Store(dir) {
   db.close();
 }
 
-test("a real v1 store migrates through v2, v3 and v4 to v5 and keeps every value", () => {
+test("a real v1 store migrates through v2, v3, v4 and v5 to v6 and keeps every value", () => {
   const dir = tempStoreDir();
   try {
     createV1Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 5);
+    assert.equal(kernel.status().schemaVersion, 6);
     assert.deepEqual(kernel.company("cmp_legacy"), {
       id: "cmp_legacy",
       name: "Legacy Ltd",
@@ -150,7 +150,7 @@ test("a real v1 store migrates through v2, v3 and v4 to v5 and keeps every value
 
     // Reopening a v2 store does not migrate again and loses nothing.
     const again = openKernel({ dir });
-    assert.equal(again.status().schemaVersion, 5);
+    assert.equal(again.status().schemaVersion, 6);
     assert.equal(again.status().counts.companies, 1);
     assert.equal(again.status().counts.artifacts, 1);
     assert.equal(again.workerRuns({ taskId: "tsk_legacy" }).length, 1);
@@ -237,13 +237,13 @@ function createV2Store(dir) {
   db.close();
 }
 
-test("a real v2 store migrates through v3 and v4 to v5 and keeps every v0B1 fact", () => {
+test("a real v2 store migrates through v3, v4 and v5 to v6 and keeps every v0B1 fact", () => {
   const dir = tempStoreDir();
   try {
     createV2Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 5);
+    assert.equal(kernel.status().schemaVersion, 6);
     assert.deepEqual(kernel.position("pos_v0b1"), {
       id: "pos_v0b1",
       companyId: "cmp_v0b1",
@@ -490,13 +490,13 @@ function createV3Store(dir) {
   db.close();
 }
 
-test("a real v3 store migrates through v4 to v5, keeps every v0B2 fact, and still has no decision", () => {
+test("a real v3 store migrates through v4 and v5 to v6, keeps every v0B2 fact, and still has no decision", () => {
   const dir = tempStoreDir();
   try {
     createV3Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 5);
+    assert.equal(kernel.status().schemaVersion, 6);
     assert.equal(kernel.recovery.count, 0, "a finished v0B2 work hides no running attempt");
 
     // Every v0B2 fact survived the migration untouched.
@@ -550,7 +550,7 @@ test("a real v3 store migrates through v4 to v5, keeps every v0B2 fact, and stil
 
     // Reopening migrates nothing again, and the decision is still there.
     const reopened = openKernel({ dir });
-    assert.equal(reopened.status().schemaVersion, 5);
+    assert.equal(reopened.status().schemaVersion, 6);
     assert.equal(reopened.status().counts.founderDecisions, 1);
     assert.equal(reopened.workProjection("wrk_v0b2").outcome.state, "ACCEPTED");
     assert.equal(reopened.workProjection("wrk_v0b2").founderAttention.item, null);
@@ -612,13 +612,13 @@ function createV4Store(dir) {
   db.close();
 }
 
-test("a real v4 store migrates to v5, keeps every v0B3 fact, and starts with no trace", () => {
+test("a real v4 store migrates through v5 to v6, keeps every v0B3 fact, and starts with no trace", () => {
   const dir = tempStoreDir();
   try {
     createV4Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 5);
+    assert.equal(kernel.status().schemaVersion, 6);
     assert.equal(kernel.recovery.count, 0);
 
     // Every v0B3 fact survived: the decision is still the immutable record it
@@ -662,7 +662,7 @@ test("a real v4 store migrates to v5, keeps every v0B3 fact, and starts with no 
 
     kernel.close();
     const reopened = openKernel({ dir });
-    assert.equal(reopened.status().schemaVersion, 5);
+    assert.equal(reopened.status().schemaVersion, 6);
     assert.equal(reopened.status().counts.continuationTraces, 1);
     assert.equal(reopened.workProjection("wrk_v0b3").outcome.state, "ACCEPTED");
     reopened.close();
@@ -671,7 +671,114 @@ test("a real v4 store migrates to v5, keeps every v0B3 fact, and starts with no 
   }
 });
 
-test("an unknown future schema version still fails clearly after v5 exists", () => {
+test("a real v5 store migrates to v6, keeps every v0B4 fact, and invents no execution provenance", () => {
+  const dir = tempStoreDir();
+  try {
+    // A real v5 store: the current code writes one, then the file is put back
+    // into its exact v5 shape — the Harness table did not exist, so it is
+    // dropped and the version is restored. This is what an architect's v0B4
+    // store looked like the moment before the Harness was introduced.
+    const seed = openKernel({ dir });
+    const company = seed.createCompany({ name: "Legacy v5 Co" });
+    const work = seed.createWork({
+      companyId: company.id,
+      title: "A work that ended before the Harness existed",
+      intent: "Its history must survive the migration unchanged",
+    });
+    const task = seed.createTask({ workId: work.id, title: "The task", intent: "One output" });
+    const position = seed.createPosition({
+      companyId: company.id,
+      title: "Analyst",
+      capabilities: ["capability.x"],
+    });
+    const employee = seed.createEmployee({
+      companyId: company.id,
+      positionId: position.id,
+      displayName: "Analyst A",
+    });
+    seed.assignTask({ taskId: task.id, employeeId: employee.id, reason: "fixture assignment" });
+    const started = seed.startWorkerRun({ taskId: task.id });
+    seed.recordArtifact({
+      taskId: task.id,
+      generation: started.generation,
+      workerRunId: started.workerRun.id,
+      kind: "document",
+      title: "Pre-Harness output",
+      content: "written before any WorkerExecutionBinding existed\n",
+    });
+    seed.completeWorkerRun({ taskId: task.id, generation: started.generation });
+    seed.recordContinuationTrace({
+      companyId: company.id,
+      workId: work.id,
+      step: 1,
+      triggerType: "STARTUP",
+      basisBefore: 1,
+      basisAfter: 2,
+      policyVersion: "v0b4.1",
+      reasonCodes: ["DECISION_REQUIRED"],
+      actionResult: "SKIPPED",
+    });
+    const before = seed.workProjection(work.id);
+    seed.close();
+
+    const db = new DatabaseSync(join(dir, STORE_FILE_NAME));
+    db.exec("DROP TABLE worker_execution_bindings");
+    db.prepare("UPDATE schema_meta SET version=?").run(5);
+    db.close();
+
+    // Reopening walks v5 → v6: additive, transactional, no backfill.
+    const kernel = openKernel({ dir });
+    assert.equal(kernel.status().schemaVersion, 6);
+    assert.equal(
+      kernel.status().counts.workerExecutionBindings,
+      0,
+      "an old store gains no execution provenance it never had",
+    );
+    assert.equal(
+      kernel.workerExecutionBinding(started.workerRun.id),
+      null,
+      "the pre-Harness WorkerRun has no binding, and none is invented for it",
+    );
+
+    // Every v0B4 fact survived.
+    assert.deepEqual(kernel.workProjection(work.id), before);
+    assert.equal(kernel.artifact(
+      before.outcome.candidateArtifacts[0].id,
+    ).title, "Pre-Harness output");
+    assert.equal(kernel.status().counts.continuationTraces, 1);
+    assert.equal(kernel.continuationTraces({ workId: work.id }).length, 1);
+
+    // The v6 table is usable from the first write, and only for a live attempt.
+    const second = kernel.createTask({ workId: work.id, title: "A new task", intent: "One output" });
+    kernel.assignTask({ taskId: second.id, employeeId: employee.id, reason: "after migration" });
+    const resumed = kernel.startWorkerRun({ taskId: second.id });
+    const bound = kernel.bindWorkerExecution({
+      workerRunId: resumed.workerRun.id,
+      generation: resumed.generation,
+      backendType: "test-worker",
+      backendVersion: "0.1.0",
+      executionProfileDigest: "sha256:profile",
+      workspaceRoot: "/tmp/run/workspace",
+      scratchRoot: "/tmp/run/scratch",
+    });
+    assert.equal(bound.idempotent, false);
+    assert.equal(
+      kernel.workerExecutionBinding(resumed.workerRun.id).id,
+      bound.binding.id,
+      "the migrated store accepts bindings for new attempts only",
+    );
+    kernel.close();
+
+    const reopened = openKernel({ dir });
+    assert.equal(reopened.status().schemaVersion, 6);
+    assert.equal(reopened.status().counts.workerExecutionBindings, 1);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown future schema version still fails clearly after v6 exists", () => {
   const dir = tempStoreDir();
   try {
     const db = new DatabaseSync(join(dir, STORE_FILE_NAME));

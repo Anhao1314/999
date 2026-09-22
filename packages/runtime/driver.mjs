@@ -45,6 +45,14 @@ function readWorkTruth(kernel, workId) {
     const assignment = kernel.assignment(task.id);
     if (assignment) assignmentsByTask.set(task.id, assignment);
   }
+  // Durable attempt history, grouped by Task: the autonomous retry budget is
+  // derived from these rows, never stored and never read from a trace.
+  const workerRunsByTask = new Map();
+  for (const run of kernel.workerRuns({ workId })) {
+    const runs = workerRunsByTask.get(run.taskId);
+    if (runs) runs.push(run);
+    else workerRunsByTask.set(run.taskId, [run]);
+  }
   const artifactById = new Map(projection.artifacts.map((artifact) => [artifact.id, artifact]));
   const reviewProducerByTask = new Map();
   for (const request of projection.reviewRequests) {
@@ -64,6 +72,7 @@ function readWorkTruth(kernel, workId) {
     reviews: projection.reviews,
     repairBindings: projection.repairBindings,
     reviewProducerByTask,
+    workerRunsByTask,
     // Availability is the same derivation the rest of the Runtime uses: an
     // Employee is BUSY exactly while they hold a RUNNING WorkerRun.
     activeEmployeeIds: employees
@@ -88,6 +97,7 @@ function boundaryOf(truth) {
     positions: truth.positions,
     activeEmployeeIds: truth.activeEmployeeIds,
     reviewProducerByTask: truth.reviewProducerByTask,
+    workerRunsByTask: truth.workerRunsByTask,
   });
 }
 

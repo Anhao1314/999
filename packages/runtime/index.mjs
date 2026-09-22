@@ -3,7 +3,7 @@
 // docs/contracts/work-continuity-v0.md
 import { WorkKernel } from "./kernel.mjs";
 
-export { WorkKernel } from "./kernel.mjs";
+export { WORKER_INTERRUPTION_REASONS, WorkKernel } from "./kernel.mjs";
 export { createContinuationDriver, MAX_WAKE_ROUNDS } from "./driver.mjs";
 export { KernelError, isKernelError } from "./errors.mjs";
 export { KernelStore, SCHEMA_VERSION, STORE_FILE_NAME } from "./store.mjs";
@@ -31,6 +31,7 @@ export {
   CONTINUATION_DIAGNOSTICS,
   CONTINUATION_POLICY_VERSION,
   CONTINUATION_REDISPATCH_REASON,
+  MAX_AUTONOMOUS_ATTEMPTS_PER_TASK,
   MAX_CONTINUATION_STEPS,
   NEXT_ACTION_PROPOSAL_FIELDS,
   NEXT_ACTION_TASK_KINDS,

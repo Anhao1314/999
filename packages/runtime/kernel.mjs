@@ -63,12 +63,23 @@ import {
   newRepairBinding,
   newReview,
   newReviewRequest,
+  newWorkerExecutionBinding,
   newWorkerRun,
+  sameExecutionBindingFacts,
   satisfiesCapabilities,
   workPacketDigest,
 } from "../workforce/index.mjs";
 
 const INTERRUPTION_REASON = "PROCESS_INTERRUPTED";
+
+// The frozen v0 vocabulary of external Worker-host interruption reasons. These
+// describe execution failure — never Founder authority, cancellation, a verdict
+// or a success result.
+export const WORKER_INTERRUPTION_REASONS = Object.freeze([
+  "WORKER_TIMEOUT",
+  "WORKER_PROCESS_EXIT",
+  "WORKER_PROTOCOL_ERROR",
+]);
 
 // Ending a WorkerRun always produces the matching audit event, from wherever
 // the run was ended (completion, cancellation, recovery).
@@ -81,6 +92,9 @@ const RUN_END_EVENT_KIND = Object.freeze({
 export class WorkKernel {
   // Notices for the transaction in flight; null outside a command.
   #notices = null;
+  // WorkerRun observations, same discipline: collected by the running command,
+  // published only after COMMIT.
+  #runNotices = null;
 
   constructor({ dir, now = () => new Date().toISOString() }) {
     this.store = new KernelStore(dir);
@@ -89,7 +103,9 @@ export class WorkKernel {
     // Committed-fact notices collected by the running command, published only
     // after COMMIT (v0B4 §8). Never a queue: it lives for one transaction.
     this.#notices = null;
+    this.#runNotices = null;
     this.continuationObserver = null;
+    this.workerRunObserver = null;
     this.recovery = this.#recoverOpenAttempts();
   }
 
@@ -99,6 +115,15 @@ export class WorkKernel {
   // transaction is open, and a rolled-back command publishes nothing at all.
   setContinuationObserver(observer) {
     this.continuationObserver = typeof observer === "function" ? observer : null;
+    return this;
+  }
+
+  // The execution seam of the Worker Harness: after a command's transaction
+  // commits, the Runtime tells whoever runs the WorkerHost that a WorkerRun has
+  // entered RUNNING. Observation only — the Host holds no WorkerRun truth, and
+  // a missed notification is healed by reconciliation against committed state.
+  setWorkerRunObserver(observer) {
+    this.workerRunObserver = typeof observer === "function" ? observer : null;
     return this;
   }
 
@@ -840,6 +865,9 @@ export class WorkKernel {
           workPacketDigest: run.workPacketDigest,
         },
       });
+      // Execution observation, post-commit only (Harness v0 §19). Duplicate
+      // notification is safe: the Host re-reads WorkerRun truth before acting.
+      this.#notifyRun({ workerRunId: run.id });
     });
     return { task: this.task(task.id), generation, workerRun: run, workPacket: packet };
   }
@@ -889,6 +917,414 @@ export class WorkKernel {
       });
     });
     return { task: this.task(task.id), workerRun: this.store.getWorkerRun(run.id) };
+  }
+
+  // The terminal successful delivery seam for one WorkerRun (H0.2). The Worker
+  // host hands over a validated successful result; the Runtime derives the rest
+  // from the Task's own requirements, so the host can never choose a handoff.
+  //
+  // Artifact recording, the WorkerRun end, the source Task transition and the
+  // Review handoff happen in ONE transaction. There is no committed state in
+  // which an Artifact exists and its WorkerRun is still RUNNING.
+  submitWorkerResult({
+    workerRunId,
+    generation,
+    resultDigest,
+    evidenceDigest,
+    artifact = {},
+    verificationSummary = null,
+    ...overrides
+  } = {}) {
+    this.#assertNoDeliveryOverride(overrides);
+    const runId = assertId(workerRunId, "workerRunId");
+    const run = this.store.getWorkerRun(runId);
+    if (!run) throw kernelError("WORKER_RUN_NOT_FOUND", `worker run ${runId} does not exist`);
+    assertInteger(generation, "generation", { min: 0 });
+    if (run.generation !== generation)
+      throw kernelError(
+        "STALE_GENERATION",
+        `worker run ${run.id} holds generation ${run.generation}, not ${generation}`,
+      );
+    const cleanResultDigest = assertText(resultDigest, "resultDigest", BOUNDS.digestMax);
+    assertNoSecret(cleanResultDigest, "resultDigest");
+    const cleanEvidenceDigest = assertText(evidenceDigest, "evidenceDigest", BOUNDS.digestMax);
+    assertNoSecret(cleanEvidenceDigest, "evidenceDigest");
+    const cleanSummary =
+      verificationSummary === null || verificationSummary === undefined
+        ? null
+        : assertText(
+            verificationSummary,
+            "verificationSummary",
+            BOUNDS.workerVerificationSummaryMax,
+          );
+    if (cleanSummary) assertNoSecret(cleanSummary, "verificationSummary");
+    const task = this.#requireTask(run.taskId);
+
+    let receipt = null;
+    let idempotent = false;
+    this.#mutate(() => {
+      // Result identity is (WorkerRun + generation + resultDigest). The receipt
+      // lives in the append-only Activity stream, so a replay after a lost
+      // response returns the committed delivery instead of writing a second one.
+      const existing = this.store.resultSubmissionForRun(run.id);
+      if (existing) {
+        if (existing.detail.resultDigest !== cleanResultDigest)
+          throw kernelError(
+            "WORKER_RESULT_CONFLICT",
+            `worker run ${run.id} already submitted digest ${existing.detail.resultDigest}, not ${cleanResultDigest}; a different result is a new attempt, never a rewrite of a delivered one`,
+          );
+        receipt = existing;
+        idempotent = true;
+        return;
+      }
+      const current = this.store.getWorkerRun(run.id);
+      if (current.state !== WORKER_RUN_STATES.RUNNING)
+        throw current.state === WORKER_RUN_STATES.COMPLETED
+          ? kernelError(
+              "WORKER_RESULT_CONFLICT",
+              `worker run ${run.id} is already COMPLETED without a submission receipt; there is nothing to replay`,
+            )
+          : kernelError(
+              "INVALID_TRANSITION",
+              `worker run ${run.id} is ${current.state}; only a RUNNING attempt can deliver a result`,
+            );
+
+      const written = this.recordArtifact({
+        taskId: task.id,
+        generation,
+        workerRunId: run.id,
+        kind: artifact?.kind,
+        title: artifact?.title,
+        content: artifact?.content,
+        supersedesArtifactId: artifact?.supersedesArtifactId ?? null,
+      });
+      const requirements = this.store.getTaskRequirements(task.id);
+      const reviewRequired = (requirements?.reviewCapabilities ?? []).length > 0;
+      const delivered = reviewRequired
+        ? this.requestReview({ taskId: task.id, generation })
+        : this.completeWorkerRun({ taskId: task.id, generation });
+      receipt = this.#writeResultSubmission({
+        task,
+        run,
+        artifact: written,
+        resultDigest: cleanResultDigest,
+        evidenceDigest: cleanEvidenceDigest,
+        verificationSummary: cleanSummary,
+        reviewRequired,
+        reviewRequest: delivered.reviewRequest ?? null,
+      });
+    });
+    return this.#submissionView(task, run, receipt, idempotent);
+  }
+
+  // The Reviewer-delivery seam (Harness Slice 1.1 §C–§F). A Reviewer Worker
+  // reports a judgment about one exact Artifact; the Runtime derives the whole
+  // lineage from the WorkerRun — Review Task, ReviewRequest, target Artifact
+  // and digest, reviewer — so the host can never name what is being judged.
+  //
+  // The Review, the Reviewer attempt's end, the Review Task's completion, the
+  // existing Review Activity and this bounded receipt commit together. The
+  // Review itself is written by the one Review implementation (`submitReview`);
+  // this command adds no second Review protocol, and it never creates a Repair
+  // — REQUEST_REVISION leaves that to the existing continuation policy.
+  submitWorkerReviewResult({
+    workerRunId,
+    generation,
+    resultDigest,
+    evidenceDigest,
+    verdict,
+    findings = [],
+    summary,
+    verificationSummary = null,
+    ...overrides
+  } = {}) {
+    this.#assertNoReviewDeliveryOverride(overrides);
+    const runId = assertId(workerRunId, "workerRunId");
+    const run = this.store.getWorkerRun(runId);
+    if (!run) throw kernelError("WORKER_RUN_NOT_FOUND", `worker run ${runId} does not exist`);
+    assertInteger(generation, "generation", { min: 0 });
+    if (run.generation !== generation)
+      throw kernelError(
+        "STALE_GENERATION",
+        `worker run ${run.id} holds generation ${run.generation}, not ${generation}`,
+      );
+    const cleanResultDigest = assertText(resultDigest, "resultDigest", BOUNDS.digestMax);
+    assertNoSecret(cleanResultDigest, "resultDigest");
+    const cleanEvidenceDigest = assertText(evidenceDigest, "evidenceDigest", BOUNDS.digestMax);
+    assertNoSecret(cleanEvidenceDigest, "evidenceDigest");
+    // The judgment's own words. The existing Review primitive requires a
+    // bounded summary and bounded findings, so this seam requires them too: a
+    // judgment with nothing to say is not a judgment this Runtime records.
+    const cleanSummary = assertText(summary, "summary", BOUNDS.reviewSummaryMax);
+    assertNoSecret(cleanSummary, "summary");
+    const cleanVerdict = assertVerdict(verdict);
+    const cleanFindings = assertFindings(findings, "findings");
+    if (cleanVerdict === REVIEW_VERDICTS.REQUEST_REVISION && cleanFindings.length === 0)
+      throw kernelError(
+        "FINDINGS_REQUIRED",
+        `a REQUEST_REVISION review must say what has to change`,
+      );
+    const cleanVerification =
+      verificationSummary === null || verificationSummary === undefined
+        ? null
+        : assertText(
+            verificationSummary,
+            "verificationSummary",
+            BOUNDS.workerVerificationSummaryMax,
+          );
+    if (cleanVerification) assertNoSecret(cleanVerification, "verificationSummary");
+    const task = this.#requireTask(run.taskId);
+
+    let receipt = null;
+    let review = null;
+    let idempotent = false;
+    this.#mutate(() => {
+      // Submission identity is (WorkerRun + generation + resultDigest), carried
+      // by the append-only Activity stream, so a replay after a lost response
+      // converges on the committed Review instead of writing a second one.
+      const existing = this.store.reviewResultSubmissionForRun(run.id);
+      if (existing) {
+        if (existing.detail.resultDigest !== cleanResultDigest)
+          throw kernelError(
+            "WORKER_REVIEW_RESULT_CONFLICT",
+            `worker run ${run.id} already submitted review digest ${existing.detail.resultDigest}, not ${cleanResultDigest}; a different judgment is a new attempt, never a rewrite of a recorded one`,
+          );
+        receipt = existing;
+        review = this.store.getReview(existing.detail.reviewId);
+        idempotent = true;
+        return;
+      }
+      const current = this.store.getWorkerRun(run.id);
+      if (current.state !== WORKER_RUN_STATES.RUNNING)
+        throw current.state === WORKER_RUN_STATES.COMPLETED
+          ? kernelError(
+              "WORKER_REVIEW_RESULT_CONFLICT",
+              `worker run ${run.id} is already COMPLETED without a submission receipt; there is nothing to replay`,
+            )
+          : kernelError(
+              "INVALID_TRANSITION",
+              `worker run ${run.id} is ${current.state}; only a RUNNING attempt can deliver a review result`,
+            );
+
+      // Lineage is derived, never accepted from the caller: the ReviewRequest
+      // for the run's own Task names the exact Artifact and digest under review.
+      const request = this.store.reviewRequestForTask(task.id);
+      if (!request)
+        throw kernelError(
+          "REVIEW_TASK_NOT_REVIEWABLE",
+          `task ${task.id} is not a review task; it has no artifact under review`,
+        );
+      const active = this.#activeRun(task.id);
+      if (!active || active.id !== run.id)
+        throw kernelError(
+          "NO_ACTIVE_RUN",
+          `worker run ${run.id} is not the running attempt of task ${task.id}`,
+        );
+      const assignment = this.store.currentAssignment(task.id);
+      if (!assignment || assignment.employeeId !== run.employeeId)
+        throw kernelError(
+          "TASK_NOT_ASSIGNED",
+          `review task ${task.id} is not assigned to the employee of run ${run.id}`,
+        );
+      // Independence is not renegotiated at delivery: the Artifact's own
+      // producer can never judge it, and an unprovable producer fails closed.
+      const producerEmployeeId = this.#reviewProducerEmployeeId(task);
+      if (producerEmployeeId === run.employeeId)
+        throw kernelError(
+          "REVIEWER_NOT_INDEPENDENT",
+          `worker run ${run.id} produced the artifact it is judging; independence was already required before this attempt started`,
+        );
+      const target = this.store.getArtifact(request.targetArtifactId);
+      if (!target || target.contentDigest !== request.targetArtifactDigest)
+        throw kernelError(
+          "REVIEW_TARGET_MISMATCH",
+          `review task ${task.id} is bound to artifact ${request.targetArtifactId} at digest ${request.targetArtifactDigest}`,
+        );
+
+      const submitted = this.submitReview({
+        reviewTaskId: task.id,
+        generation,
+        verdict: cleanVerdict,
+        summary: cleanSummary,
+        findings: cleanFindings,
+      });
+      review = submitted.review;
+      receipt = this.#writeReviewSubmission({
+        task,
+        run,
+        review,
+        resultDigest: cleanResultDigest,
+        evidenceDigest: cleanEvidenceDigest,
+        verificationSummary: cleanVerification,
+      });
+    });
+    return this.#reviewSubmissionView(task, run, review, receipt, idempotent);
+  }
+
+  // The execution binding seam (Harness v0 §13): persist the one immutable
+  // record of where and how one WorkerRun attempt executes. Lineage is derived
+  // from Runtime truth — the Host states the backend and the paths, never the
+  // Company/Work/Task identity. A retry with the same facts returns the
+  // committed binding; a different backend or workspace for the same attempt is
+  // a conflict, because an attempt is never rebound.
+  bindWorkerExecution({
+    workerRunId,
+    generation,
+    backendType,
+    backendVersion,
+    executionProfileDigest,
+    workspaceRoot,
+    scratchRoot,
+    baseRevision = null,
+    branch = null,
+    externalExecutionRef = null,
+    externalSessionRef = null,
+  } = {}) {
+    const runId = assertId(workerRunId, "workerRunId");
+    const run = this.store.getWorkerRun(runId);
+    if (!run) throw kernelError("WORKER_RUN_NOT_FOUND", `worker run ${runId} does not exist`);
+    assertInteger(generation, "generation", { min: 0 });
+    if (run.generation !== generation)
+      throw kernelError(
+        "STALE_GENERATION",
+        `worker run ${run.id} holds generation ${run.generation}, not ${generation}`,
+      );
+    const task = this.#requireTask(run.taskId);
+    const { companyId, workId } = this.#contextOfTask(task);
+    const cleanText = (value, field, max) => {
+      const text = assertText(value, field, max);
+      assertNoSecret(text, field);
+      return text;
+    };
+    const nullableText = (value, field) =>
+      value === null || value === undefined ? null : cleanText(value, field, BOUNDS.externalRefMax);
+    const binding = newWorkerExecutionBinding({
+      companyId,
+      workId,
+      taskId: task.id,
+      workerRunId: run.id,
+      generation,
+      backendType: cleanText(backendType, "backendType", BOUNDS.backendTypeMax),
+      backendVersion: cleanText(backendVersion, "backendVersion", BOUNDS.backendVersionMax),
+      executionProfileDigest: cleanText(
+        executionProfileDigest,
+        "executionProfileDigest",
+        BOUNDS.digestMax,
+      ),
+      workspaceRoot: cleanText(workspaceRoot, "workspaceRoot", BOUNDS.executionPathMax),
+      scratchRoot: cleanText(scratchRoot, "scratchRoot", BOUNDS.executionPathMax),
+      baseRevision: nullableText(baseRevision, "baseRevision"),
+      branch: nullableText(branch, "branch"),
+      externalExecutionRef: nullableText(externalExecutionRef, "externalExecutionRef"),
+      externalSessionRef: nullableText(externalSessionRef, "externalSessionRef"),
+      createdAt: this.now(),
+    });
+    if (binding.workspaceRoot === binding.scratchRoot)
+      throw kernelError(
+        "INVALID_INPUT",
+        "workspaceRoot and scratchRoot must be different directories; scratch is not part of the deliverable workspace",
+      );
+    let committed = binding;
+    let idempotent = false;
+    this.#mutate(() => {
+      const existing = this.store.getWorkerExecutionBindingByRun(run.id);
+      if (existing) {
+        if (!sameExecutionBindingFacts(existing, binding))
+          throw kernelError(
+            "EXECUTION_BINDING_CONFLICT",
+            `worker run ${run.id} is already bound to ${existing.backendType} at ${existing.workspaceRoot}; an attempt is never rebound to another backend or workspace`,
+          );
+        committed = existing;
+        idempotent = true;
+        return;
+      }
+      if (run.state !== WORKER_RUN_STATES.RUNNING)
+        throw kernelError(
+          "INVALID_TRANSITION",
+          `worker run ${run.id} is ${run.state}; only a RUNNING attempt is bound to an execution`,
+        );
+      this.store.insertWorkerExecutionBinding(binding);
+      this.#event({
+        companyId,
+        workId,
+        taskId: task.id,
+        generation,
+        kind: EVENTS.WORKER_EXECUTION_BOUND,
+        detail: {
+          bindingId: binding.id,
+          workerRunId: run.id,
+          backendType: binding.backendType,
+          backendVersion: binding.backendVersion,
+          executionProfileDigest: binding.executionProfileDigest,
+        },
+      });
+    });
+    return { binding: committed, idempotent };
+  }
+
+  // The Worker host's execution report: the current attempt can no longer
+  // continue. This is NOT Founder authority — it cannot accept Work, cancel
+  // anything, create a Review or Repair, or change permissions. It records one
+  // fact through the same interruption primitive startup recovery uses, and
+  // after COMMIT the ordinary continuation seam decides what may follow.
+  interruptWorkerRun({ workerRunId, generation, reason } = {}) {
+    const runId = assertId(workerRunId, "workerRunId");
+    const run = this.store.getWorkerRun(runId);
+    if (!run) throw kernelError("WORKER_RUN_NOT_FOUND", `worker run ${runId} does not exist`);
+    assertInteger(generation, "generation", { min: 0 });
+    if (!WORKER_INTERRUPTION_REASONS.includes(reason))
+      throw kernelError(
+        "INVALID_INPUT",
+        `reason must be one of ${WORKER_INTERRUPTION_REASONS.join(" | ")}`,
+      );
+    const task = this.#requireTask(run.taskId);
+
+    // Retry-safe: the same attempt is already INTERRUPTED. Nothing is written
+    // and no duplicate interruption Activity is produced.
+    if (run.state === WORKER_RUN_STATES.INTERRUPTED) {
+      if (run.generation !== generation)
+        throw kernelError(
+          "STALE_GENERATION",
+          `worker run ${run.id} holds generation ${run.generation}, not ${generation}`,
+        );
+      return { workerRun: run, task, interrupted: false, alreadyInterrupted: true };
+    }
+    if (run.state !== WORKER_RUN_STATES.RUNNING)
+      throw kernelError(
+        "INVALID_TRANSITION",
+        `worker run ${run.id} is ${run.state}; only a RUNNING attempt can be interrupted`,
+      );
+    if (run.generation !== generation)
+      throw kernelError(
+        "STALE_GENERATION",
+        `worker run ${run.id} holds generation ${run.generation}, not ${generation}`,
+      );
+    if (task.state !== TASK_STATES.RUNNING)
+      throw kernelError(
+        "INVALID_TRANSITION",
+        `task ${task.id} is ${task.state}; only a RUNNING task can be interrupted`,
+      );
+    const activeRun = this.#activeRun(task.id);
+    if (!activeRun || activeRun.id !== run.id)
+      throw kernelError(
+        "INVALID_TRANSITION",
+        `worker run ${run.id} is not the active attempt of task ${task.id}`,
+      );
+    if (task.generation !== run.generation)
+      throw kernelError(
+        "STALE_GENERATION",
+        `task ${task.id} is at generation ${task.generation}; the attempt holds ${run.generation}`,
+      );
+
+    this.#mutate(() => {
+      this.#interruptAttempt(task, run, reason);
+    });
+    return {
+      workerRun: this.store.getWorkerRun(run.id),
+      task: this.task(task.id),
+      interrupted: true,
+      alreadyInterrupted: false,
+    };
   }
 
   // --- review and repair (v0B2) --------------------------------------------
@@ -1470,19 +1906,47 @@ export class WorkKernel {
   #mutate(fn) {
     if (this.store.inTransaction) return this.store.transaction(fn);
     const notices = [];
+    const runNotices = [];
     this.#notices = notices;
+    this.#runNotices = runNotices;
     let result;
     try {
       result = this.store.transaction(fn);
     } finally {
       this.#notices = null;
+      this.#runNotices = null;
     }
     this.#publish(notices);
+    this.#publishRunNotices(runNotices);
     return result;
   }
 
   #notify(notice) {
     if (this.#notices) this.#notices.push(notice);
+  }
+
+  #notifyRun(notice) {
+    if (this.#runNotices) this.#runNotices.push(notice);
+  }
+
+  // One signal per WorkerRun that entered RUNNING in this transaction. A
+  // notification failure is an observability failure: the WorkerRun truth has
+  // already committed and stays authoritative.
+  #publishRunNotices(notices) {
+    const observer = this.workerRunObserver;
+    if (!observer || notices.length === 0) return;
+    const seen = new Set();
+    for (const notice of notices) {
+      if (seen.has(notice.workerRunId)) continue;
+      seen.add(notice.workerRunId);
+      try {
+        observer({ workerRunId: notice.workerRunId });
+      } catch (error) {
+        process.stderr.write(
+          `worker run observer failed after commit: ${error?.message ?? error}\n`,
+        );
+      }
+    }
   }
 
   // One signal per affected Work and one per company-wide cause: a transaction
@@ -1522,37 +1986,47 @@ export class WorkKernel {
     this.store.transaction(() => {
       for (const task of this.store.listTasksByState(TASK_STATES.RUNNING)) {
         const { companyId, workId } = this.#contextOfTask(task);
-        const fencedGeneration = task.generation + 1;
         const activeRun = this.#activeRun(task.id);
-        this.store.updateTask(task.id, {
-          state: TASK_STATES.INTERRUPTED,
-          generation: fencedGeneration,
-          updatedAt: this.now(),
-        });
-        this.#event({
-          companyId,
-          workId,
-          taskId: task.id,
-          generation: fencedGeneration,
-          kind: "task.interrupted",
-          detail: {
-            interruptedGeneration: task.generation,
-            reason: INTERRUPTION_REASON,
-            automaticRetry: false,
-          },
-        });
-        if (activeRun)
-          this.#endRun(activeRun, WORKER_RUN_STATES.INTERRUPTED, INTERRUPTION_REASON);
+        const { interruptedGeneration } = this.#interruptAttempt(
+          task,
+          activeRun,
+          INTERRUPTION_REASON,
+        );
         interrupted.push({
           taskId: task.id,
           workId,
           companyId,
-          interruptedGeneration: task.generation,
+          interruptedGeneration,
           workerRunId: activeRun?.id ?? null,
         });
       }
     });
     return { interrupted, count: interrupted.length, at: this.openedAt };
+  }
+
+  // The ONE interruption primitive: fence the Task generation, mark the Task
+  // INTERRUPTED, record the Activity, and end the attempt. Startup recovery and
+  // the external `interruptWorkerRun` command both go through here, so there is
+  // exactly one interruption semantics and one fencing rule.
+  #interruptAttempt(task, run, reason) {
+    const { companyId, workId } = this.#contextOfTask(task);
+    const interruptedGeneration = task.generation;
+    const fencedGeneration = interruptedGeneration + 1;
+    this.store.updateTask(task.id, {
+      state: TASK_STATES.INTERRUPTED,
+      generation: fencedGeneration,
+      updatedAt: this.now(),
+    });
+    this.#event({
+      companyId,
+      workId,
+      taskId: task.id,
+      generation: fencedGeneration,
+      kind: "task.interrupted",
+      detail: { interruptedGeneration, reason, automaticRetry: false },
+    });
+    if (run) this.#endRun(run, WORKER_RUN_STATES.INTERRUPTED, reason);
+    return { interruptedGeneration, fencedGeneration };
   }
 
   // --- reads ----------------------------------------------------------------
@@ -1593,10 +2067,30 @@ export class WorkKernel {
     return this.store.getWorkerRun(assertId(id, "workerRunId")) ?? null;
   }
 
-  workerRuns({ taskId = null, employeeId = null } = {}) {
+  workerRuns({ taskId = null, employeeId = null, workId = null, state = null } = {}) {
+    if (state !== null && !Object.values(WORKER_RUN_STATES).includes(state))
+      throw kernelError(
+        "INVALID_INPUT",
+        `state must be one of ${Object.values(WORKER_RUN_STATES).join(" | ")}`,
+      );
     return this.store.listWorkerRuns({
       taskId: taskId ? assertId(taskId, "taskId") : null,
       employeeId: employeeId ? assertId(employeeId, "employeeId") : null,
+      workId: workId ? assertId(workId, "workId") : null,
+      state,
+    });
+  }
+
+  workerExecutionBinding(workerRunId) {
+    return (
+      this.store.getWorkerExecutionBindingByRun(assertId(workerRunId, "workerRunId")) ?? null
+    );
+  }
+
+  workerExecutionBindings({ workId = null, taskId = null } = {}) {
+    return this.store.listWorkerExecutionBindings({
+      workId: workId ? assertId(workId, "workId") : null,
+      taskId: taskId ? assertId(taskId, "taskId") : null,
     });
   }
 
@@ -1873,6 +2367,12 @@ export class WorkKernel {
       const run = target?.workerRunId ? this.store.getWorkerRun(target.workerRunId) : null;
       if (run) reviewProducerByTask.set(request.reviewTaskId, run.employeeId);
     }
+    // How many attempts each Task has already consumed: the autonomous retry
+    // budget is derived from these durable rows, never stored and never read
+    // from a trace.
+    const attemptsByTask = new Map();
+    for (const run of this.store.listWorkerRuns({ workId: work.id }))
+      attemptsByTask.set(run.taskId, (attemptsByTask.get(run.taskId) ?? 0) + 1);
     const collaboration = deriveCollaboration({
       tasks,
       reviewRequests,
@@ -1895,6 +2395,7 @@ export class WorkKernel {
       assignmentsByTask,
       reviewProducerByTask,
       activeEmployeeIds,
+      attemptsByTask,
       decisionBasis,
     });
     return {
@@ -2077,6 +2578,129 @@ export class WorkKernel {
         `task ${task.id} is bound to replace ${repairBinding.targetArtifactId}, not ${id}`,
       );
     return id;
+  }
+
+  // The review delivery's lineage is derived from the WorkerRun for the same
+  // reason: a host that tries to name the task, request, target or reviewer is
+  // refused rather than silently ignored.
+  #assertNoReviewDeliveryOverride(overrides) {
+    const named = Object.keys(overrides ?? {});
+    if (named.length === 0) return;
+    throw kernelError(
+      "INVALID_INPUT",
+      `submitWorkerReviewResult does not accept ${named.join(", ")}; the task, request, target artifact and reviewer this judgment belongs to are derived from the WorkerRun inside the Runtime`,
+    );
+  }
+
+  // Delivery is derived, never chosen: a host that tries to select the handoff
+  // is refused rather than silently ignored.
+  #assertNoDeliveryOverride(overrides) {
+    const named = Object.keys(overrides ?? {});
+    if (named.length === 0) return;
+    throw kernelError(
+      "INVALID_INPUT",
+      `submitWorkerResult does not accept ${named.join(", ")}; whether a delivery completes the Task or hands it off for review is derived from the Task's requirements inside the Runtime`,
+    );
+  }
+
+  // The durable receipt of one successful delivery: append-only, bounded, and
+  // traceable from both the WorkerRun and the Artifact. No logs, no raw event
+  // stream, no transcript, no model output, no secrets. The full Harness
+  // evidence stays outside the Runtime; only its digest is recorded.
+  #writeResultSubmission({
+    task,
+    run,
+    artifact,
+    resultDigest,
+    evidenceDigest,
+    verificationSummary,
+    reviewRequired,
+    reviewRequest,
+  }) {
+    const { companyId, workId } = this.#contextOfTask(task);
+    const detail = {
+      workerRunId: run.id,
+      generation: run.generation,
+      artifactId: artifact.id,
+      resultDigest,
+      evidenceDigest,
+      verificationSummary,
+      reviewRequired,
+      reviewRequestId: reviewRequest?.id ?? null,
+    };
+    this.#event({
+      companyId,
+      workId,
+      taskId: task.id,
+      generation: run.generation,
+      kind: EVENTS.WORKER_RESULT_SUBMITTED,
+      detail,
+    });
+    return { detail };
+  }
+
+  // The durable receipt of one Reviewer delivery: append-only, bounded and
+  // traceable from the WorkerRun, the Review and the Review Task. Only the
+  // judgment's identity and the Harness evidence digest are recorded — never
+  // the evidence itself, the provider's raw output or any prompt text.
+  #writeReviewSubmission({
+    task,
+    run,
+    review,
+    resultDigest,
+    evidenceDigest,
+    verificationSummary,
+  }) {
+    const { companyId, workId } = this.#contextOfTask(task);
+    const detail = {
+      workerRunId: run.id,
+      generation: run.generation,
+      reviewId: review.id,
+      resultDigest,
+      evidenceDigest,
+      verificationSummary,
+    };
+    this.#event({
+      companyId,
+      workId,
+      taskId: task.id,
+      generation: run.generation,
+      kind: EVENTS.WORKER_REVIEW_RESULT_SUBMITTED,
+      detail,
+    });
+    return { detail };
+  }
+
+  #reviewSubmissionView(task, run, review, receipt, idempotent) {
+    const { detail } = receipt;
+    return {
+      review: this.store.getReview(detail.reviewId),
+      task: this.task(task.id),
+      workerRun: this.store.getWorkerRun(run.id),
+      resultDigest: detail.resultDigest,
+      evidenceDigest: detail.evidenceDigest,
+      verificationSummary: detail.verificationSummary,
+      idempotent,
+    };
+  }
+
+  #submissionView(task, run, receipt, idempotent) {
+    const { detail } = receipt;
+    const reviewRequest = detail.reviewRequestId
+      ? this.store.getReviewRequest(detail.reviewRequestId)
+      : null;
+    return {
+      workerRun: this.store.getWorkerRun(run.id),
+      task: this.task(task.id),
+      artifact: this.store.getArtifact(detail.artifactId),
+      reviewRequired: detail.reviewRequired,
+      reviewTask: reviewRequest ? this.task(reviewRequest.reviewTaskId) : null,
+      reviewRequest,
+      resultDigest: detail.resultDigest,
+      evidenceDigest: detail.evidenceDigest,
+      verificationSummary: detail.verificationSummary,
+      idempotent,
+    };
   }
 
   // What a reviewer is granted: the exact Artifact to judge, its recorded

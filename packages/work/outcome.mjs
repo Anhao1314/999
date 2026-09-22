@@ -18,9 +18,14 @@ const byCreatedAt = (records) =>
       : a.createdAt.localeCompare(b.createdAt),
   );
 
-// A current outcome candidate is an Artifact whose producing Task finished and
-// that nothing in the Work has replaced. "Latest" is never consulted: the
-// contract decides by supersession, never by recency.
+// A current outcome candidate is an Artifact whose producing Task finished, at
+// the generation that Task finished on, and that nothing in the Work has
+// replaced. "Latest" is never consulted: the contract decides by supersession,
+// never by recency.
+//
+// Historical evidence is not current outcome reality. An Artifact left behind
+// by an abandoned or interrupted generation stays readable and immutable
+// forever, but it can never become a candidate again once its Task moves on.
 export function currentOutcomeCandidates({ tasks = [], artifacts = [] } = {}) {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const superseded = new Set(
@@ -30,7 +35,11 @@ export function currentOutcomeCandidates({ tasks = [], artifacts = [] } = {}) {
     artifacts.filter((artifact) => {
       if (superseded.has(artifact.id)) return false;
       const producer = taskById.get(artifact.taskId);
-      return Boolean(producer) && producer.state === "COMPLETED";
+      return (
+        Boolean(producer) &&
+        producer.state === "COMPLETED" &&
+        artifact.generation === producer.generation
+      );
     }),
   );
 }
