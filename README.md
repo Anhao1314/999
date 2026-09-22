@@ -64,7 +64,7 @@ store 会逐级迁移（v1 → v2 → v3 → v4 → v5）且不做任何历史�
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs`
-- 还没有 UI、没有 Canvas、没有模型调用；协调由确定性的 Continuation Driver 完成（不是
+- 已增加可禁用的 AI 员工像素大厅与工牌 UI（见下方），没有 Canvas 工作台、没有模型调用；协调由确定性的 Continuation Driver 完成（不是
   scheduler / event bus / 持久队列），Hiring / Genesis 未开始。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
@@ -111,6 +111,20 @@ Founder = Authority · Work = Continuity · Runtime = Control · Semantic Sensor
 完整清单见 [架构原则](docs/architecture/principles.md) 与 [对象模型](docs/architecture/object-model.md)。
 
 ## Run and test
+
+### AI 员工模块（增量接入）
+
+`npm run start:employees` 启动同一个 Runtime，默认访问 `http://127.0.0.1:4318/employees`。
+沿用 `FLOWCREDIT_RUNTIME_DIR`、`FLOWCREDIT_COORDINATION`、`FLOWCREDIT_PORT`；不会自动创建公司、员工或任务。
+默认页面为像素大厅，右上“角色”打开管理层，点击员工打开居中工牌。
+
+- 真实模式：读取持久化员工、岗位、任务、运行、活动与产物元数据；支持现有 Kernel 的分配、启动、启用/停用。
+- `/employees?demo=1` 是明确标记的浏览器内模拟模式；不写 Runtime，也不调用模型。
+- 头像只作本页本地裁剪预览；真实配置保存、暂停/恢复、删除归档、模型、工具与 Token 统计均未接入并禁用。
+- `FLOWCREDIT_EMPLOYEE_UI=0` 禁用新增页面和模块 API；原有 Kernel 路由仍可用。
+- `npm run test:employees` 运行模块单元与 HTTP 集成测试。验收、截图、限制和后端交接见 [集成报告](reports/INTEGRATION_REPORT.md)。
+
+员工模块仍是本地单用户开发界面，未增加生产登录系统；Runtime 继续只绑定 loopback。
 
 要求 Node **24.19.0**（`.nvmrc`）。
 
