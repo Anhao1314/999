@@ -163,15 +163,18 @@ test("desktop window keeps the frozen security and navigation contract", async (
 test("desktop build outputs stay ignored while the master icon stays canonical", () => {
   const ignored = (path) => {
     try {
-      execFileSync("git", ["check-ignore", "-q", path], { cwd: ROOT });
+      // --no-index keeps the answer a pure pathname rule: CI checks out a tree
+      // where build outputs do not exist yet.
+      execFileSync("git", ["check-ignore", "-q", "--no-index", path], { cwd: ROOT });
       return true;
     } catch {
       return false;
     }
   };
-  assert.equal(ignored("apps/desktop/dist"), true);
-  assert.equal(ignored("apps/desktop/build"), true);
-  assert.equal(ignored("apps/desktop/node_modules"), true);
+  assert.equal(ignored("apps/desktop/dist/"), true);
+  assert.equal(ignored("apps/desktop/build/"), true);
+  assert.equal(ignored("apps/desktop/node_modules/"), true);
+  assert.equal(ignored("apps/desktop/dist/Relay Code-darwin-arm64/Relay Code.app"), true);
   assert.equal(ignored("apps/desktop/assets/relay-code-master.png"), false);
   assert.equal(ignored("apps/desktop/src/main.mjs"), false);
   assert.equal(ignored("apps/desktop/scripts/package.mjs"), false);
