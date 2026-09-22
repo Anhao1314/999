@@ -15,6 +15,14 @@
 //                           describe it. The host decides; the kernel never
 //                           drives itself, and `driveWork` stays available as
 //                           an explicit command either way.
+//   FLOWCREDIT_WORKER_BACKEND `off` (default) | `test-worker` | `codex-exec` —
+//                           which WorkerAdapter executes committed attempts.
+//                           `codex-exec` additionally needs FLOWCREDIT_CODEX_REPO
+//                           and reads FLOWCREDIT_CODEX_BASE_REVISION,
+//                           FLOWCREDIT_CODEX_VERIFICATION (whitespace-separated
+//                           argv, default `node --test`),
+//                           FLOWCREDIT_CODEX_PROTECTED_PATHS (comma-separated)
+//                           and FLOWCREDIT_CODEX_EVIDENCE_DIR.
 //
 // Routes: GET /health, GET /status, GET /companies, GET /companies/:id,
 //         GET /companies/:id/works, GET /companies/:id/positions,
@@ -28,7 +36,12 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
 import { createContinuationDriver, openKernel } from "../../packages/runtime/index.mjs";
-import { createWorkerHost, createStaticWorkerBackendResolver } from "../../packages/harness/index.mjs";
+import {
+  createCodexExecAdapter,
+  createStaticWorkerBackendResolver,
+  createWorkerHost,
+  discoverCodexVersion,
+} from "../../packages/harness/index.mjs";
 import { createTestWorkerAdapter } from "../../packages/harness/adapters/test-worker.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
@@ -46,8 +59,10 @@ if (!COORDINATION_MODES.includes(COORDINATION)) {
 
 // The execution switch: `off` means this process coordinates but executes
 // nothing. `test-worker` runs the deterministic Worker Harness backend — it is
-// NOT a model and NOT intelligence; the real CodexExecAdapter is a later slice.
-const WORKER_BACKENDS = Object.freeze(["off", "test-worker"]);
+// NOT a model and NOT intelligence. `codex-exec` runs the production
+// CodexExecAdapter: one real local `codex exec` child per attempt, configured
+// entirely through FLOWCREDIT_CODEX_* (see docs/contracts/codex-exec-adapter-v1.md).
+const WORKER_BACKENDS = Object.freeze(["off", "test-worker", "codex-exec"]);
 const WORKER_BACKEND = process.env.FLOWCREDIT_WORKER_BACKEND ?? "off";
 if (!WORKER_BACKENDS.includes(WORKER_BACKEND)) {
   process.stderr.write(
@@ -93,6 +108,48 @@ const driver = createContinuationDriver({ kernel, observe: COORDINATION === "dri
 // The WorkerHost executes attempts the Runtime started; it never coordinates.
 // It is bound into this process with the same honesty as the coordination
 // switch: absent an explicit backend, nothing executes.
+//
+// codex-exec configuration is execution configuration, never Company truth:
+// a base repository to provision run worktrees from, the revision to stand on,
+// an independent verification command and the paths that must stay untouched.
+async function buildCodexExecWorkerHost() {
+  const baseRepository = process.env.FLOWCREDIT_CODEX_REPO;
+  if (!baseRepository) {
+    process.stderr.write("FLOWCREDIT_WORKER_BACKEND=codex-exec requires FLOWCREDIT_CODEX_REPO\n");
+    process.exit(1);
+  }
+  const verificationCommand = (process.env.FLOWCREDIT_CODEX_VERIFICATION ?? "node --test")
+    .split(/\s+/)
+    .filter((part) => part.length > 0);
+  const protectedPaths = (process.env.FLOWCREDIT_CODEX_PROTECTED_PATHS ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const adapter = createCodexExecAdapter({
+    baseRepository,
+    verification: { command: verificationCommand },
+    protectedPaths,
+    evidenceDir: process.env.FLOWCREDIT_CODEX_EVIDENCE_DIR ?? null,
+  });
+  const backendVersion = (await discoverCodexVersion()) ?? "unknown";
+  return createWorkerHost({
+    kernel,
+    adapter,
+    resolver: createStaticWorkerBackendResolver({
+      backendType: "codex-exec",
+      backendVersion,
+      baseRevision: process.env.FLOWCREDIT_CODEX_BASE_REVISION ?? "HEAD",
+    }),
+    runtimeRoot: DIR,
+    // A real model-backed attempt takes longer than the deterministic test
+    // backend. The operator can always narrow or widen this explicitly.
+    timeoutMs: Number(
+      process.env.FLOWCREDIT_WORKER_TIMEOUT_MS ??
+        (WORKER_BACKEND === "codex-exec" ? 600_000 : 30_000),
+    ),
+  });
+}
+
 const workerHost =
   WORKER_BACKEND === "test-worker"
     ? createWorkerHost({
@@ -102,7 +159,9 @@ const workerHost =
         runtimeRoot: DIR,
         timeoutMs: Number(process.env.FLOWCREDIT_WORKER_TIMEOUT_MS ?? 30_000),
       })
-    : null;
+    : WORKER_BACKEND === "codex-exec"
+      ? await buildCodexExecWorkerHost()
+      : null;
 if (workerHost) workerHost.start();
 
 function send(response, status, payload) {

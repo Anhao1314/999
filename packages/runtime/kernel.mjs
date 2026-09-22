@@ -75,10 +75,24 @@ const INTERRUPTION_REASON = "PROCESS_INTERRUPTED";
 // The frozen v0 vocabulary of external Worker-host interruption reasons. These
 // describe execution failure — never Founder authority, cancellation, a verdict
 // or a success result.
+//
+// The four reasons draw one line precisely: how the attempt ended, and whether
+// the Worker's own result was ever usable.
+//   WORKER_TIMEOUT        the Host stopped an attempt that ran out of time;
+//   WORKER_PROCESS_EXIT   the child process failed (spawn, signal, non-zero exit);
+//   WORKER_PROTOCOL_ERROR the result was malformed, invalid or named facts the
+//                         Worker does not own — no usable candidate existed;
+//   WORKER_OUTPUT_REJECTED a protocol-valid candidate existed, but independent
+//                         Harness evidence or an execution-policy postcondition
+//                         rejected the delivery (failed verification, moved HEAD,
+//                         a changed protected path, no required change, an
+//                         oversized diff). The specific postcondition stays in
+//                         HarnessEvidence; the Runtime sees only this reason.
 export const WORKER_INTERRUPTION_REASONS = Object.freeze([
   "WORKER_TIMEOUT",
   "WORKER_PROCESS_EXIT",
   "WORKER_PROTOCOL_ERROR",
+  "WORKER_OUTPUT_REJECTED",
 ]);
 
 // Ending a WorkerRun always produces the matching audit event, from wherever

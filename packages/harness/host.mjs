@@ -16,6 +16,7 @@ import { ensureRunWorkspace, leaseStateForRun, runWorkspaceLayout } from "./exec
 import { normalizeWorkerEvent } from "./events.mjs";
 import {
   buildHarnessEvidence,
+  HARNESS_REJECTION_REASONS,
   parseWorkerResult,
   parseWorkerReviewResult,
   workerResultDigest,
@@ -222,11 +223,11 @@ export function createWorkerHost({
 
     // One report shape for every interrupted attempt: the Runtime records the
     // fact, the Host says what it observed. Nothing is written on the way.
-    const interrupt = async (reason, detail = null) => {
+    const interrupt = async (reason, detail = null, extra = null) => {
       await safeCancel(handle, reason);
       kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason });
       await drain.catch(() => {});
-      report(run.id, run.generation, HOST_STATUS.INTERRUPTED, { reason, detail });
+      report(run.id, run.generation, HOST_STATUS.INTERRUPTED, { reason, detail, ...(extra ?? {}) });
     };
 
     // An invalid candidate is never delivered and never patched up: the attempt
@@ -255,13 +256,22 @@ export function createWorkerHost({
         return;
       }
       if (adapterResult.terminalStatus === "FAILED") {
-        // `PROCESS_EXIT` is the one failure the adapter itself can certify; any
-        // other failure is the adapter telling us the execution protocol broke.
-        const processExit = adapterResult.failureReason === "PROCESS_EXIT";
-        await interrupt(
-          processExit ? "WORKER_PROCESS_EXIT" : "WORKER_PROTOCOL_ERROR",
-          adapterResult.reason ?? adapterResult.failureReason,
-        );
+        // Three different facts, three different reasons. `PROCESS_EXIT` is the
+        // one failure the adapter itself certifies; a Harness postcondition
+        // rejection explains a delivery that was refused even though a
+        // protocol-valid candidate existed (the specific postcondition stays in
+        // the report detail and in HarnessEvidence); anything else is the
+        // adapter telling us the execution protocol broke.
+        const failureReason = adapterResult.failureReason ?? null;
+        if (failureReason === "PROCESS_EXIT") {
+          await interrupt("WORKER_PROCESS_EXIT", adapterResult.reason ?? failureReason);
+        } else if (HARNESS_REJECTION_REASONS.includes(failureReason)) {
+          await interrupt("WORKER_OUTPUT_REJECTED", adapterResult.reason ?? failureReason, {
+            failureReason,
+          });
+        } else {
+          await interrupt("WORKER_PROTOCOL_ERROR", adapterResult.reason ?? failureReason);
+        }
         return;
       }
 

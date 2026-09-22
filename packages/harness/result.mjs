@@ -16,6 +16,29 @@ export const HARNESS_EVIDENCE_VERSION = 1;
 export const WORKER_RESULT_OUTCOMES = Object.freeze(["SUCCEEDED", "FAILED"]);
 export const WORKER_REVIEW_VERDICTS = Object.freeze([...REVIEW_VERDICT_VALUES]);
 
+// The bounded, backend-neutral vocabulary of Harness delivery postconditions.
+// A backend raises one of these only after it extracted a protocol-valid result
+// candidate: something about the delivered attempt — not the protocol — was
+// rejected. The Runtime never sees these codes; it sees exactly one interruption
+// reason, `WORKER_OUTPUT_REJECTED`, and the specific postcondition stays in
+// HarnessEvidence for the operator.
+//
+//   HARNESS_GIT_VIOLATION            the attempt moved HEAD (committed its work)
+//   HARNESS_PROTECTED_PATH_MODIFIED  a path that must stay byte-identical changed
+//   HARNESS_VERIFICATION_FAILED      independent verification ran and did not pass
+//   HARNESS_NO_CHANGE                the attempt delivered no change at all
+//   HARNESS_ARTIFACT_TOO_LARGE       the workspace diff exceeds the artifact bound
+//
+// A malformed, invalid or missing result candidate is never one of these: that
+// stays `WORKER_PROTOCOL_ERROR`.
+export const HARNESS_REJECTION_REASONS = Object.freeze([
+  "HARNESS_GIT_VIOLATION",
+  "HARNESS_PROTECTED_PATH_MODIFIED",
+  "HARNESS_VERIFICATION_FAILED",
+  "HARNESS_NO_CHANGE",
+  "HARNESS_ARTIFACT_TOO_LARGE",
+]);
+
 const RESULT_KEYS = Object.freeze([
   "resultVersion",
   "outcome",

@@ -25,6 +25,7 @@ export async function startRuntime({
   coordination = false,
   workerBackend = "off",
   workerTimeoutMs = null,
+  extraEnv = null,
 } = {}) {
   if (!dir) throw new Error("startRuntime requires a store directory");
   const child = spawn(process.execPath, ["apps/runtime/server.mjs"], {
@@ -37,6 +38,10 @@ export async function startRuntime({
       FLOWCREDIT_COORDINATION: coordination ? "driver" : "off",
       FLOWCREDIT_WORKER_BACKEND: workerBackend,
       ...(workerTimeoutMs === null ? {} : { FLOWCREDIT_WORKER_TIMEOUT_MS: String(workerTimeoutMs) }),
+      // Execution-backend configuration (e.g. the FLOWCREDIT_CODEX_* variables
+      // the codex-exec backend reads). Tests and operations only: never a way
+      // to write Company truth.
+      ...(extraEnv ?? {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

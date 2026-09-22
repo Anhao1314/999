@@ -58,10 +58,12 @@ store 会逐级迁移（v1 → v2 → v3 → v4 → v5 → v6）且不做任何�
 
 H0/H0.1/H0.2 是**实验证据**：用真实 `codex exec` 子进程验证执行层假设——真实 Codex
 执行从实验上确认了 Harness 的隔离边界、中断与结构化结果假设，这些结论随后被固化成执行
-契约；而 committed 的 Worker Harness v0 是 **provider-neutral** 的生产执行架构，生产
-`CodexExecAdapter` 仍 **NOT YET IMPLEMENTED**。执行层的形态：一次 WorkerRun 的结束由
+契约。committed 的 Worker Harness v0 是 **provider-neutral** 的生产执行架构；
+`CodexExecAdapter` 是它的第一个真实 backend，已在真实 CLI（`codex-cli
+0.154.0-alpha.6.2`）上完成 H1 验证。执行层的形态：一次 WorkerRun 的结束由
 Worker host 报告——失败走 `interruptWorkerRun`（`WORKER_TIMEOUT` / `WORKER_PROCESS_EXIT` /
-`WORKER_PROTOCOL_ERROR`，与崩溃恢复共用同一个中断 primitive），成功走 `submitWorkerResult`。
+`WORKER_PROTOCOL_ERROR` / `WORKER_OUTPUT_REJECTED`，与崩溃恢复共用同一个中断 primitive），
+成功走 `submitWorkerResult`。
 成功交付是**原子**的：Artifact 记录、WorkerRun 收口、Task 状态与 **Runtime 自己推导的**
 Review 交接在同一事务提交，host 无法自行选择交接方式；重放
 `(workerRunId, generation, resultDigest)` 幂等，换 digest 则 `WORKER_RESULT_CONFLICT`。
@@ -84,13 +86,34 @@ WorkerResult（Worker 自述）与 HarnessEvidence（Host 观测）是两个对�
 Runtime 从 WorkerRun 推导 Review Task → ReviewRequest → 目标 Artifact + digest 的全部
 lineage，复用同一个 `submitReview` 原语，绝不伪造 verdict，也不会在事务里顺手创建
 Repair。两条 seam 都以 `(workerRunId, generation, resultDigest)` 幂等，冲突返回 409；
-Provider 专属解析属于 adapter，schema 验证属于 Host，非法候选只会中断尝试（
-`WORKER_PROTOCOL_ERROR`），永远不会变成 Runtime truth。自动重试是**有界**的：
+Provider 专属解析属于 adapter，schema 验证属于 Host：没有可用的结果协议时中断尝试
+（`WORKER_PROTOCOL_ERROR`），协议合法但被独立 Harness 证据或执行策略拒绝时中断尝试
+（`WORKER_OUTPUT_REJECTED`，具体原因如 verification / HEAD / 受保护路径留在 evidence
+侧），两者都永远不会变成 Runtime truth。自动重试是**有界**的：
 `MAX_AUTONOMOUS_ATTEMPTS_PER_TASK = 3`（1 次初始 + 2 次自动重试），计数完全从持久的
 WorkerRun 历史推导，不存计数器、不加 Task 状态；预算用尽后 Driver 停止
 （`AUTO_RETRY_EXHAUSTED`），Work 进入 Founder Attention（`RESUME_EXECUTION` /
-`ASSIGN_EMPLOYEE` / `ENABLE_EMPLOYEE` / `ABANDON_TASK`）。真实 `CodexExecAdapter` 不在
-本切片内。
+`ASSIGN_EMPLOYEE` / `ENABLE_EMPLOYEE` / `ABANDON_TASK`）。
+
+`CodexExecAdapter` 把同一个 WorkerAdapter 契约接到真实的本地 `codex exec` 上：一次
+WorkerRun = 一个全新的子进程（`--ephemeral`，不 resume）；base repository + 精确
+baseRevision 通过 `git worktree --detach` 变成 run-scoped workspace，源 checkout 永不
+被触碰、worker 永不 commit / push；`TMPDIR`/`TMP`/`TEMP` 指向 run scratch，并诚实记录
+sandbox ≠ OS 级隔离。prompt 只由 WorkPacket + run envelope 编译（角色、目标、成功标准、
+独立验证命令、受保护路径、禁止的外部效果、结果 JSON 形状；不要求 chain-of-thought）。
+结果解析先 strict JSON、再在文本里提取**唯一**的顶层 JSON 对象（fenced 或裸对象同样
+对待；两个可解析对象直接拒绝），绝不推断缺失字段、绝不用第二次 LLM 修 malformed
+输出；模型自述与 Harness 独立观测（进程 / git diff vs baseRevision / 受保护路径 /
+独立运行验证命令）是两个对象。H1 已在真实 CLI 上跑通：真实执行 → 独立验证
+通过 → 真实 Codex reviewer PASS → `READY_FOR_DECISION` → Founder ACCEPT（Work 提出后
+0 条手动协调命令）；真实超时 → `WORKER_TIMEOUT` → 自动重派到新 generation 的新
+workspace（旧 workspace 被投毒也永不复用）；结果协议非法时 3 次尝试全部
+`WORKER_PROTOCOL_ERROR`、不产生 Artifact / Review、交给 Founder。H1.1 收口了失败原因
+词汇（协议非法 vs 交付被拒）并用三个真实任务场景（输入规范化、ISO-8601 时长、区间代数）
+各跑通一条“真实执行 → 真实评审”链路：Reviewer 每次都是自主判定且诚实地 PASS，
+**没有观测到真实的 `REQUEST_REVISION`**，所以 Repair 证据缺口记为
+`REAL_REPAIR_EVIDENCE_NOT_OBSERVED`（协议本身由确定性测试覆盖）。重启、评审与修复
+语义完全复用 v0A–v0B4，Runtime 不受 Codex 影响。
 
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
   [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md) ·
@@ -98,16 +121,19 @@ WorkerRun 历史推导，不存计数器、不加 Task 状态；预算用尽后 
   [Founder Attention & Acceptance v0B3](docs/contracts/founder-attention-acceptance-v0.md) ·
   [Work Continuity v0B4](docs/contracts/work-continuity-v0.md) ·
   [Worker Execution Seam v0 (H0.1 + H0.2)](docs/contracts/worker-execution-seam-v0.md) ·
-  [Worker Harness v0 (Slice 1.1)](docs/contracts/worker-harness-v0.md)
+  [Worker Harness v0 (Slice 1.1)](docs/contracts/worker-harness-v0.md) ·
+  [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
-- 还没有 UI、没有 Canvas、没有模型调用；协调由确定性的 Continuation Driver 完成（不是
-  scheduler / event bus / 持久队列），执行由 WorkerHost + 确定性 test backend 完成
-  （真实 CodexExecAdapter 仍未接入），Hiring / Genesis 未开始。
+- 还没有 UI、没有 Canvas；协调由确定性的 Continuation Driver 完成（不是 scheduler /
+  event bus / 持久队列）；执行由 WorkerHost + `codex-exec` backend 完成（另有确定性的
+  test backend 用于测试），Hiring / Genesis 未开始。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
-都还没有实现——Kernel 只是它们共同的 Runtime 地基，还没有真实模型执行。
+都还没有实现——Kernel 只是它们共同的 Runtime 地基。真实模型执行已经接通
+（`CodexExecAdapter` + H1），但 Company Genesis / AI Hiring Loop 尚未开始，
+AI Workforce Loop 也还没有被正式宣布 PASS。
 
 v0B3 记录了一个 **AI Workforce MVP closure gate**：
 
@@ -116,11 +142,12 @@ v0B3 记录了一个 **AI Workforce MVP closure gate**：
 **v0B4 关闭了这个 gate**：`FLOWCREDIT_COORDINATION=driver` 时，普通 Task 的指派与启动、
 Review 的指派、Repair 的协调都由 Runtime 的 Continuation Driver 逐步完成；Scenario 1 /
 Scenario 2 实测 Founder Extra Touch 与 Manual Coordination 均为 **0**。这个结果的名字是
-`Deterministic Workforce Coordination Closure = PASS`，**不是**"完整产品自主"——真实执行
-仍需要 execution adapter / System 2 接入，所以 MVP 2 还没有宣布 PASS。v0B4 不包含
-scheduler、capability ranking、DAG planner、Dynamic Swarm、Hiring 或 Knowledge
-Admission；历史能力仍留在旧的 R&D 仓库（见下），迁移遵循 capability by capability，
-不整目录复制。
+`Deterministic Workforce Coordination Closure = PASS`，**不是**"完整产品自主"。真实执行
+此后由 `CodexExecAdapter` 接通（H1：真实执行 → 真实评审 → Founder ACCEPT；真实超时
+自动重派到新 workspace；结果协议失败不产生 Artifact、交给 Founder），但 MVP 2 是否
+PASS 仍留给一次显式的 closure 审核，不自动成立。v0B4 不包含 scheduler、capability
+ranking、DAG planner、Dynamic Swarm、Hiring 或 Knowledge Admission；历史能力仍留在旧的
+R&D 仓库（见下），迁移遵循 capability by capability，不整目录复制。
 
 ## The three core MVPs
 
@@ -162,13 +189,22 @@ node scripts/demo-review-repair-v0b2.mjs # 协作演示：Review → Repair → 
 node scripts/demo-founder-acceptance-v0b3.mjs # 接受演示：Founder Attention → ACCEPT → ACCEPTED（含硬重启）
 node scripts/demo-work-continuity-v0b4.mjs # 协调演示：Driver 自动派工/开工/Review/Repair（0 手动协调 + 跨 Work 唤醒）
 node scripts/demo-worker-harness-v0.mjs # 执行演示：WorkerHost + 确定性 test backend（执行→评审→ACCEPT、REVISION→Repair→PASS、超时重派与 workspace 隔离、重试预算用尽后交给 Founder）
+node scripts/h1-codex-exec.mjs smoke    # H1：真实 codex exec（需已安装并登录 Codex CLI；只写 /tmp/flowcredit-h1）
+node scripts/h1-codex-exec.mjs A        # H1：真实执行 → 真实评审 → READY_FOR_DECISION → Founder ACCEPT
+node scripts/h1-codex-exec.mjs B        # H1：真实超时 → 自动重派到新 generation 的新 workspace
+node scripts/h1-codex-exec.mjs C        # H1：结果协议失败（受控子进程）→ WORKER_PROTOCOL_ERROR
+node scripts/h1-1-codex-repair.mjs 1|2|3 # H1.1：真实执行 → 真实评审（三个场景，Reviewer 自主判定；只写 /tmp/flowcredit-h1-1）
+node scripts/h1-1-codex-repair.mjs boundary 1|2|3 # H1.1：重挂已完成的 store（coordination=off，不调用模型）→ Founder 边界 + 显式 ACCEPT
 node apps/runtime/server.mjs        # 以长期进程方式启动 Kernel
 ```
 
 服务进程读取 `FLOWCREDIT_RUNTIME_DIR`（store 目录）与 `FLOWCREDIT_PORT`
 （默认 `0` = 临时端口，只监听 `127.0.0.1`），以及 `FLOWCREDIT_COORDINATION`
 （默认 `off`；设为 `driver` 时启动 Continuation Driver：启动后 drive 一次，
-并在每个命令提交后唤醒）。零运行时依赖，尚未安装任何 SDK、框架或模型客户端。
+并在每个命令提交后唤醒）与 `FLOWCREDIT_WORKER_BACKEND`（默认 `off`；`test-worker`
+是确定性测试 backend；`codex-exec` 是真实本地 Codex CLI，需 `FLOWCREDIT_CODEX_REPO`
+等配置，见 [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md)）。
+零运行时依赖：adapter 通过子进程调用操作者本机已安装的 Codex CLI，不引入 SDK。
 
 ## Relationship to the old worklab repository
 
@@ -192,17 +228,20 @@ docs/contracts/   Persistent Work Kernel v0A 契约
                    / Worker Execution Seam v0 契约（中断命令、原子结果投递与 H0 实验结论）
                    / Worker Harness v0 Slice 1.1 契约（WorkerHost、执行绑定、workspace 隔离、
                      Reviewer 交付 seam、角色化 ResultContract 与有界自动重试）
+                   / CodexExecAdapter v1 契约（真实 codex exec 子进程、worktree workspace、
+                     prompt 编译、结果解析与独立 Harness 证据）
 docs/migration/   旧仓库能力迁移清单与 provenance
 packages/         company（公司根对象）/ work（Work、Task、生命周期、协作、outcome 与
                   Continuation Policy 投影）/ decision（Founder Decision 记录）/
                   planning（确定性 NextActionProposer）/ workforce（Position、Employee、
                   Assignment、WorkerRun、Work Packet、dispatchability）/
                   harness（WorkerAdapter 契约、WorkerHost、角色化 ResultContract、
-                  执行绑定与 workspace 布局、确定性 test backend）/
+                  执行绑定与 workspace 布局、确定性 test backend、真实
+                  CodexExecAdapter 与 prompt/结果解析）/
                   runtime（命令、存储、schema 迁移、Continuation Driver）
 apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam + Founder Attention 读取）
 fixtures/         种子数据（system workforce roster），不属于核心语言
-scripts/          check、重启演示与进程 harness
+scripts/          check、重启演示、进程 harness 与 H1 真实执行场景
 tests/            smoke / 单元 / 集成测试（node --test）
 ```
 
