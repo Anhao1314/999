@@ -38,6 +38,7 @@ const REQUIRED_PATHS = [
   "docs/contracts/codex-exec-adapter-v1.md",
   "docs/contracts/workforce-experience-v0.md",
   "docs/contracts/employee-lobby-v0.md",
+  "docs/contracts/founder-workspace-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
   "packages/runtime/index.mjs",
   "apps/runtime/server.mjs",

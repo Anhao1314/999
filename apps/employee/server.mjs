@@ -5,6 +5,7 @@
 // Workforce Experience HTTP API directly (see apps/employee/adapter.mjs), so
 // the Lobby cannot drift into a second read path or a manual scheduler.
 import { readFile } from 'node:fs/promises';
+import { isLocalBrowserRequest } from '../local-origin.mjs';
 
 const ROOT = new URL('./', import.meta.url);
 const ASSETS = new Set([
@@ -14,12 +15,8 @@ const ASSETS = new Set([
 ]);
 const TYPES = { mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png', html: 'text/html; charset=utf-8' };
 
-export function isLocalBrowserRequest(request) {
-  const host = request.headers.host;
-  if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host ?? '')) return false;
-  if (request.headers['sec-fetch-site'] === 'cross-site') return false;
-  return !request.headers.origin || request.headers.origin === `http://${host}`;
-}
+// Re-exported for the Runtime process, which gates /commands with the same rule.
+export { isLocalBrowserRequest };
 
 export function createEmployeeRoutes({ enabled = true } = {}) {
   return async (request, response, url) => {
