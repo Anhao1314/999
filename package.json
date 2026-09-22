@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start:employees": "node scripts/start-employee-ui.mjs",
-    "test:employees": "node --test tests/unit/employee-domain.test.mjs tests/unit/employee-adapter.test.mjs tests/integration/employee-http.test.mjs",
+    "test:employees": "node --test tests/unit/employee-domain.test.mjs tests/unit/employee-adapter.test.mjs tests/unit/employee-lobby-source.test.mjs tests/integration/employee-http.test.mjs",
     "test": "node --test",
     "check": "node scripts/check.mjs"
   }
