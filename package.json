@@ -2,7 +2,7 @@
   "name": "flowcredit",
   "version": "0.0.0",
   "private": true,
-  "description": "FlowCredit — Personal AI Company OS. Re-foundation bootstrap: no runtime is implemented in this repository yet.",
+  "description": "FlowCredit — Personal AI Company OS. Persistent work kernel (Company, Work, Task, Artifact, Employee, Review, Repair, Founder Decision) with deterministic workforce coordination on Node's built-in SQLite. No model providers, no UI.",
   "type": "module",
   "engines": {
     "node": ">=24.19.0 <25"
