@@ -39,9 +39,12 @@ const REQUIRED_PATHS = [
   "docs/contracts/workforce-experience-v0.md",
   "docs/contracts/employee-lobby-v0.md",
   "docs/contracts/founder-workspace-v0.md",
+  "docs/contracts/relay-code-desktop-v0.md",
   "docs/migration/from-flowcredit-worklab-v1.md",
   "packages/runtime/index.mjs",
   "apps/runtime/server.mjs",
+  "apps/desktop/package.json",
+  "apps/desktop/src/main.mjs",
 ];
 
 const FORBIDDEN_TRACKED = [
