@@ -14,6 +14,7 @@
 //
 // Nothing here is stored, and nothing here mutates.
 import { classifyEmployeeCandidates } from "../workforce/eligibility.mjs";
+import { deriveWorkforceDispatch } from "../workforce/dispatch.mjs";
 import { satisfiesCapabilities } from "../workforce/capabilities.mjs";
 import { OUTCOME_STATES } from "./outcome.mjs";
 
@@ -26,6 +27,7 @@ export const ATTENTION_KINDS = Object.freeze({
 export const ATTENTION_DIAGNOSTICS = Object.freeze({
   COLLABORATION_BLOCKED: "COLLABORATION_BLOCKED",
   CAPABILITY_GAP: "CAPABILITY_GAP",
+  NO_DISPATCHABLE_EMPLOYEE: "NO_DISPATCHABLE_EMPLOYEE",
   OUTCOME_AMBIGUOUS: "OUTCOME_AMBIGUOUS",
   NO_CANDIDATE: "NO_CANDIDATE",
 });
@@ -76,6 +78,8 @@ export function deriveWorkAttention({
   positions = [],
   requirementsByTask = new Map(),
   assignmentsByTask = new Map(),
+  reviewProducerByTask = new Map(),
+  activeEmployeeIds = [],
   decisionBasis = null,
 } = {}) {
   const reviewTaskIds = new Set(reviewRequests.map((request) => request.reviewTaskId));
@@ -98,60 +102,124 @@ export function deriveWorkAttention({
     const assignment = assignmentsByTask.get(task.id) ?? null;
     const assigned = assignment ? employeesById.get(assignment.employeeId) ?? null : null;
     const assignedPosition = assigned ? positionsById.get(assigned.positionId) ?? null : null;
+    // A reviewer is never a candidate for the Artifact they produced, so the
+    // producer is excluded from every continuation this Task can derive.
+    const producerEmployeeId = reviewProducerByTask.get(task.id) ?? null;
     const assignedValid = Boolean(
       assigned &&
         assigned.enabled &&
         assignedPosition &&
-        satisfiesCapabilities(requirements, assignedPosition.capabilities),
+        satisfiesCapabilities(requirements, assignedPosition.capabilities) &&
+        assigned.id !== producerEmployeeId,
     );
     const workforce = classifyEmployeeCandidates({
       employees,
       positions,
       requiredCapabilities: requirements,
     });
-    return { requirements, assignment, assignedValid, workforce };
+    const dispatch = deriveWorkforceDispatch({
+      employees,
+      positions,
+      requiredCapabilities: requirements,
+      activeEmployeeIds,
+      excludeEmployeeIds: producerEmployeeId ? [producerEmployeeId] : [],
+    });
+    const assignedDispatchable = Boolean(
+      assigned && dispatch.dispatchable.some((entry) => entry.employee.id === assigned.id),
+    );
+    return { requirements, assignment, assignedValid, assignedDispatchable, workforce, dispatch };
   };
 
   // --- 1. EXECUTION_INTERRUPTED ---------------------------------------------
+  //
+  // v0B4 narrowed this: the Runtime continues an interrupted attempt whenever
+  // it deterministically can, so only a condition the Runtime refuses to
+  // resolve reaches the Founder (contract §11). Trace history plays no part —
+  // everything below is current truth and nothing else.
   const interrupted = tasks.filter((task) => task.state === "INTERRUPTED");
   if (interrupted.length > 0) {
-    conditions.push(ATTENTION_KINDS.EXECUTION_INTERRUPTED);
     const actions = [];
     const interruptedTasks = [];
-    let sawCapabilityGap = false;
+    const contendedTaskIds = [];
+    const capabilityGapTaskIds = [];
+    let needsFounder = false;
     for (const task of interrupted) {
       const role = roleOf(task);
-      const { assignedValid, workforce } = continuationFor(task);
-      if (assignedValid) actions.push(action(ATTENTION_ACTIONS.RESUME_EXECUTION, ACTION_EFFECTS.RESOLVES, { taskId: task.id }));
-      else if (workforce.eligible.length > 0)
-        actions.push(action(ATTENTION_ACTIONS.ASSIGN_EMPLOYEE, ACTION_EFFECTS.RESOLVES, { taskId: task.id }));
-      else if (workforce.disabledCapable.length > 0)
-        actions.push(action(ATTENTION_ACTIONS.ENABLE_EMPLOYEE, ACTION_EFFECTS.ADVANCES, { taskId: task.id }));
-      else sawCapabilityGap = true;
+      const { assignedValid, assignedDispatchable, dispatch } = continuationFor(task);
+      const dispatchable = dispatch.dispatchable;
+      // Two deterministic continuations belong to the Runtime, not the Founder:
+      // resume the usable Assignment, or hand the Task to the one Employee who
+      // can take it. Neither becomes an Inbox item — and neither does an
+      // Employee being busy, which clears itself when a WorkerRun ends.
+      if (assignedValid && assignedDispatchable) continue;
+      if (!assignedValid && dispatchable.length === 1) continue;
+
+      const taskActions = [];
+      let founderAction = null;
+      if (dispatchable.length > 1) {
+        // More than one Employee could take it and this Runtime never picks.
+        founderAction = action(ATTENTION_ACTIONS.ASSIGN_EMPLOYEE, ACTION_EFFECTS.RESOLVES, {
+          taskId: task.id,
+          dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
+        });
+      } else if (dispatch.eligible.length === 0 && dispatch.disabledCapable.length > 0) {
+        founderAction = action(ATTENTION_ACTIONS.ENABLE_EMPLOYEE, ACTION_EFFECTS.ADVANCES, {
+          taskId: task.id,
+        });
+      } else if (dispatch.eligible.length > 0 || assignedValid) {
+        // Eligible, but nothing is dispatchable: contention clears itself when
+        // a WorkerRun ends, so it is a diagnostic and never an Inbox item.
+        contendedTaskIds.push(task.id);
+      } else {
+        capabilityGapTaskIds.push(task.id);
+      }
+      if (founderAction) taskActions.push(founderAction);
       // Cancelling an interrupted Review or Repair Task would leave an
-      // obligation nothing can ever satisfy, so it is not offered as an exit.
-      if (role === TASK_ROLES.EXECUTION)
-        actions.push(action(ATTENTION_ACTIONS.ABANDON_TASK, ACTION_EFFECTS.RESOLVES, { taskId: task.id }));
+      // obligation nothing can ever satisfy, so abandoning is offered only for
+      // an execution Task — and only when this Task genuinely needs a choice.
+      if (
+        role === TASK_ROLES.EXECUTION &&
+        (founderAction !== null || capabilityGapTaskIds.at(-1) === task.id)
+      )
+        taskActions.push(
+          action(ATTENTION_ACTIONS.ABANDON_TASK, ACTION_EFFECTS.RESOLVES, { taskId: task.id }),
+        );
+      if (taskActions.length > 0) {
+        needsFounder = true;
+        actions.push(...taskActions);
+      }
       interruptedTasks.push({
         taskId: task.id,
         title: task.title,
         role,
         generation: task.generation,
-        resumable: assignedValid,
+        resumable: assignedValid && assignedDispatchable,
+        dispatchableEmployeeIds: dispatchable.map((entry) => entry.employee.id),
       });
     }
-    if (actions.length > 0)
+    // The condition is reported only when it is actually unresolved: a
+    // deterministically resumable interruption must leave this section silent.
+    if (needsFounder || contendedTaskIds.length > 0 || capabilityGapTaskIds.length > 0)
+      conditions.push(ATTENTION_KINDS.EXECUTION_INTERRUPTED);
+    if (needsFounder)
       candidates.push({
         kind: ATTENTION_KINDS.EXECUTION_INTERRUPTED,
         evidence: { interruptedTasks },
         actions,
       });
-    if (sawCapabilityGap)
+    if (contendedTaskIds.length > 0)
+      diagnostics.push({
+        code: ATTENTION_DIAGNOSTICS.NO_DISPATCHABLE_EMPLOYEE,
+        reason:
+          "every Employee who can do this work is already executing something; availability clears this, not the Founder",
+        evidence: { interruptedTaskIds: contendedTaskIds },
+      });
+    if (capabilityGapTaskIds.length > 0)
       diagnostics.push({
         code: ATTENTION_DIAGNOSTICS.CAPABILITY_GAP,
         reason:
           "no existing Employee satisfies the requirements of an interrupted Task, so the Work cannot continue",
-        evidence: { interruptedTaskIds: interrupted.map((task) => task.id) },
+        evidence: { interruptedTaskIds: capabilityGapTaskIds },
       });
   }
 
@@ -277,7 +345,7 @@ export function deriveWorkAttention({
 
 const SUMMARY = Object.freeze({
   [ATTENTION_KINDS.EXECUTION_INTERRUPTED]:
-    "Execution was interrupted, and this Runtime never restarts an attempt by itself.",
+    "Execution was interrupted, and this Runtime cannot continue it without a Founder choice.",
   [ATTENTION_KINDS.REPAIR_UNASSIGNABLE]:
     "A Repair exists that nobody can currently be assigned to.",
   [ATTENTION_KINDS.DECISION_REQUIRED]:

@@ -15,7 +15,11 @@ export function repoRoot() {
   return fileURLToPath(new URL("../../", import.meta.url));
 }
 
-export async function startRuntime({ dir, timeoutMs = 15000 } = {}) {
+// `coordination: true` starts the process with the Continuation Driver
+// installed (v0B4), so committed changes wake it and non-terminal Work is
+// driven after recovery. Omitted, the process is the v0A–v0B3 kernel: every
+// coordination step is an explicit command.
+export async function startRuntime({ dir, timeoutMs = 15000, coordination = false } = {}) {
   if (!dir) throw new Error("startRuntime requires a store directory");
   const child = spawn(process.execPath, ["apps/runtime/server.mjs"], {
     cwd: repoRoot(),
@@ -24,6 +28,7 @@ export async function startRuntime({ dir, timeoutMs = 15000 } = {}) {
       HOME: process.env.HOME,
       FLOWCREDIT_PORT: "0",
       FLOWCREDIT_RUNTIME_DIR: dir,
+      FLOWCREDIT_COORDINATION: coordination ? "driver" : "off",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

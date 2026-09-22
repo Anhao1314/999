@@ -106,7 +106,7 @@ test("a ready outcome asks the Founder to decide, and the advertised action is t
   }
 });
 
-test("an interrupted execution needs the Founder, because nothing resumes it", () => {
+test("a deterministically resumable interruption is not Founder Attention at all", () => {
   const { kernel, cleanup } = openTempKernel();
   try {
     const staffed = seedStaffedTask(kernel);
@@ -114,34 +114,25 @@ test("an interrupted execution needs the Founder, because nothing resumes it", (
     kernel.recover(); // what a restart does to an attempt that was still running
     assert.equal(kernel.task(staffed.task.id).state, "INTERRUPTED");
 
-    const item = attentionFor(kernel, staffed.company.id, staffed.work.id);
-    assert.equal(item.kind, ATTENTION_KINDS.EXECUTION_INTERRUPTED);
-    // Two exits, both real: run it again, or abandon it. Nothing pretends the
-    // Runtime will pick either one by itself.
-    assert.deepEqual(actionKinds(item).sort(), [
-      ATTENTION_ACTIONS.ABANDON_TASK,
-      ATTENTION_ACTIONS.RESUME_EXECUTION,
-    ]);
-    assert.deepEqual(item.evidence.interruptedTasks, [
-      {
-        taskId: staffed.task.id,
-        title: staffed.task.title,
-        role: "execution",
-        generation: 2,
-        resumable: true,
-      },
-    ]);
+    // v0B4: the Runtime restarts this attempt itself, so the Founder is not
+    // asked. Nothing about the condition is even reported as an attention
+    // condition — the section is silent.
+    const projection = kernel.workProjection(staffed.work.id);
+    assert.equal(projection.founderAttention.item, null);
+    assert.deepEqual(projection.founderAttention.conditions, []);
+    assert.deepEqual(projection.founderAttention.diagnostics, []);
+    assert.deepEqual(kernel.founderAttention({ companyId: staffed.company.id }), []);
 
-    // The advertised exit genuinely works: a new generation, running again.
+    // Resuming is still a legal command — it is just no longer a question.
     const resumed = kernel.startWorkerRun({ taskId: staffed.task.id });
     assert.equal(resumed.task.state, "RUNNING");
-    assert.equal(attentionFor(kernel, staffed.company.id, staffed.work.id), null);
+    assert.equal(kernel.workProjection(staffed.work.id).founderAttention.item, null);
   } finally {
     cleanup();
   }
 });
 
-test("an interrupted execution nobody is assigned to advertises an assignment, not autonomy", () => {
+test("an interrupted execution nobody is assigned to is continued by the Runtime, not announced", () => {
   const { kernel, cleanup } = openTempKernel();
   try {
     const { company, work } = seedCompanyAndWork(kernel);
@@ -151,10 +142,41 @@ test("an interrupted execution nobody is assigned to advertises an assignment, n
       intent: "One output the founder can act on",
       requiredCapabilities: ["capability.x"],
     });
-    const { employee } = seedEmployee(kernel, company.id, {
+    seedEmployee(kernel, company.id, {
       displayName: "Analyst A",
       capabilities: ["capability.x"],
     });
+    kernel.startTask({ taskId: task.id });
+    kernel.recover();
+
+    // Exactly one Employee can take it, so the Runtime will: the projection
+    // records no assignment of its own and asks for nothing.
+    const projection = kernel.workProjection(work.id);
+    assert.equal(projection.founderAttention.item, null);
+    assert.deepEqual(projection.founderAttention.conditions, []);
+    assert.deepEqual(projection.founderAttention.diagnostics, []);
+    assert.equal(
+      kernel.assignment(task.id),
+      null,
+      "reading attention never assigns; the Driver does that from truth, later",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("an ambiguous replacement is Founder Attention, because the Runtime never picks", () => {
+  const { kernel, cleanup } = openTempKernel();
+  try {
+    const { company, work } = seedCompanyAndWork(kernel);
+    const task = kernel.createTask({
+      workId: work.id,
+      title: "Produce the analysis",
+      intent: "One output the founder can act on",
+      requiredCapabilities: ["capability.x"],
+    });
+    seedEmployee(kernel, company.id, { displayName: "Analyst A", capabilities: ["capability.x"] });
+    seedEmployee(kernel, company.id, { displayName: "Analyst B", capabilities: ["capability.x"] });
     kernel.startTask({ taskId: task.id });
     kernel.recover();
 
@@ -164,25 +186,62 @@ test("an interrupted execution nobody is assigned to advertises an assignment, n
       ATTENTION_ACTIONS.ABANDON_TASK,
       ATTENTION_ACTIONS.ASSIGN_EMPLOYEE,
     ]);
-    assert.equal(
-      kernel.assignment(task.id),
-      null,
-      "an eligible Employee is not an assignment, and the Runtime makes none",
-    );
-    assert.ok(
-      item.actions.every((entry) => ["RESOLVES", "ADVANCES"].includes(entry.effect)),
-      "only actions with a proven effect are advertised",
-    );
-
-    // The advertised exit works, and claiming it clears the item.
-    kernel.assignTask({ taskId: task.id, employeeId: employee.id, reason: "the founder decides" });
-    kernel.startWorkerRun({ taskId: task.id });
-    assert.equal(kernel.task(task.id).state, "RUNNING");
-    assert.equal(attentionFor(kernel, company.id, work.id), null);
+    assert.equal(item.actions[0].dispatchableEmployeeIds.length, 2);
   } finally {
     cleanup();
   }
 });
+
+test("an Employee being busy is a diagnostic, never a capability gap and never an item", () => {
+  const { kernel, cleanup } = openTempKernel();
+  try {
+    const staffed = seedStaffedTask(kernel);
+    kernel.startWorkerRun({ taskId: staffed.task.id });
+    kernel.recover(); // the attempt is now INTERRUPTED and its Employee is free
+    assert.equal(kernel.task(staffed.task.id).state, "INTERRUPTED");
+
+    // Another line of work takes the only capable Employee first, so the
+    // interrupted Task's continuation is blocked by availability — the one
+    // thing that clears itself when a WorkerRun ends.
+    const other = kernel.createWork({
+      companyId: staffed.company.id,
+      title: "Another line of work",
+      intent: "One output the founder can act on",
+    });
+    const busyTask = kernel.createTask({
+      workId: other.id,
+      title: "Produce something else",
+      intent: "One output the founder can act on",
+      requiredCapabilities: ["capability.x"],
+    });
+    kernel.assignTask({
+      taskId: busyTask.id,
+      employeeId: staffed.employee.id,
+      reason: "keeps the analyst busy",
+    });
+    kernel.startWorkerRun({ taskId: busyTask.id });
+
+    const projection = kernel.workProjection(staffed.work.id);
+    assert.equal(projection.founderAttention.item, null);
+    assert.deepEqual(
+      projection.founderAttention.diagnostics.map((entry) => entry.code),
+      [ATTENTION_DIAGNOSTICS.NO_DISPATCHABLE_EMPLOYEE],
+      "the Company still has the capability; it is only busy",
+    );
+    assert.equal(
+      projection.founderAttention.diagnostics.some(
+        (entry) => entry.code === ATTENTION_DIAGNOSTICS.CAPABILITY_GAP,
+      ),
+      false,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+
+
+
 
 test("enabling a capable Employee is offered as an advance when it is the only honest action", () => {
   const { kernel, cleanup } = openTempKernel();
@@ -209,22 +268,18 @@ test("enabling a capable Employee is offered as an advance when it is the only h
     assert.equal(enable.effect, "ADVANCES", "enabling alone does not resume anything");
     assert.ok(actionKinds(item).includes(ATTENTION_ACTIONS.ABANDON_TASK));
 
+    // Enabling makes exactly one Employee dispatchable, so the continuation
+    // stops being a question: the Runtime hands the Task to them by itself.
     kernel.setEmployeeEnabled({ employeeId: employee.id, enabled: true });
-    assert.ok(
-      !actionKinds(attentionFor(kernel, company.id, work.id)).includes(
-        ATTENTION_ACTIONS.ENABLE_EMPLOYEE,
-      ),
-      "the projection follows the workforce without being stored anywhere",
-    );
-    assert.ok(
-      actionKinds(attentionFor(kernel, company.id, work.id)).includes(
-        ATTENTION_ACTIONS.ASSIGN_EMPLOYEE,
-      ),
-    );
+    const after = kernel.workProjection(work.id);
+    assert.equal(after.founderAttention.item, null);
+    assert.deepEqual(after.founderAttention.conditions, []);
+    assert.deepEqual(after.founderAttention.diagnostics, []);
   } finally {
     cleanup();
   }
 });
+
 
 test("a capability gap with no capable Employee leaves abandoning as the only honest exit", () => {
   const { kernel, cleanup } = openTempKernel();
@@ -373,7 +428,7 @@ test("REQUEST_REVISION with a deterministic Repair available asks the Founder fo
   }
 });
 
-test("an interrupted review asks to be resumed, and never offers to be cancelled away", () => {
+test("an interrupted review the Runtime can resume is not Founder Attention", () => {
   const { kernel, cleanup } = openTempKernel();
   try {
     const flow = seedTaskInReview(kernel);
@@ -387,19 +442,20 @@ test("an interrupted review asks to be resumed, and never offers to be cancelled
     kernel.recover();
     assert.equal(kernel.task(handoff.reviewTask.id).state, "INTERRUPTED");
 
-    const item = attentionFor(kernel, flow.company.id, flow.work.id);
-    assert.equal(item.kind, ATTENTION_KINDS.EXECUTION_INTERRUPTED);
-    assert.equal(item.evidence.interruptedTasks[0].role, "review");
-    assert.deepEqual(actionKinds(item), [ATTENTION_ACTIONS.RESUME_EXECUTION]);
-    assert.equal(
-      actionKinds(item).includes(ATTENTION_ACTIONS.ABANDON_TASK),
-      false,
-      "cancelling a review leaves an obligation nothing can ever satisfy",
-    );
+    // The reviewer's Assignment is intact and the reviewer is free, so this is
+    // a resumption the Runtime performs — no item, and cancelling it is never
+    // offered (that would leave an obligation nothing can satisfy).
+    const projection = kernel.workProjection(flow.work.id);
+    assert.equal(projection.founderAttention.item, null);
+    assert.deepEqual(projection.founderAttention.conditions, []);
+    const resumed = kernel.startWorkerRun({ taskId: handoff.reviewTask.id });
+    assert.equal(resumed.task.state, "RUNNING");
+    assert.equal(kernel.workProjection(flow.work.id).founderAttention.item, null);
   } finally {
     cleanup();
   }
 });
+
 
 test("cancelling a Repair is legal, but it is not an exit — so it is not offered as one", () => {
   const { kernel, cleanup } = openTempKernel();
@@ -449,7 +505,7 @@ test("cancelling a Repair is legal, but it is not an exit — so it is not offer
   }
 });
 
-test("interruption outranks an unassignable Repair, and each Work appears at most once", () => {
+test("an interruption the Runtime resumes adds no condition to a Work that needs the Founder elsewhere", () => {
   const { kernel, cleanup } = openTempKernel();
   try {
     const flow = seedTaskInReview(kernel);
@@ -474,15 +530,13 @@ test("interruption outranks an unassignable Repair, and each Work appears at mos
 
     const items = kernel.founderAttention({ companyId: flow.company.id });
     assert.equal(items.length, 1, "one Work, one item");
-    assert.equal(items[0].kind, ATTENTION_KINDS.EXECUTION_INTERRUPTED);
-    assert.deepEqual(items[0].conditions.sort(), [
-      ATTENTION_KINDS.EXECUTION_INTERRUPTED,
-      ATTENTION_KINDS.REPAIR_UNASSIGNABLE,
-    ]);
+    assert.equal(items[0].kind, ATTENTION_KINDS.REPAIR_UNASSIGNABLE);
+    assert.deepEqual(items[0].conditions, [ATTENTION_KINDS.REPAIR_UNASSIGNABLE]);
   } finally {
     cleanup();
   }
 });
+
 
 test("attention is ordered by what needs a human first", () => {
   const { kernel, cleanup } = openTempKernel();

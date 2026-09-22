@@ -9,6 +9,7 @@ import { tempStoreDir } from "../support/kernel.mjs";
 import { V1_SCHEMA_DDL } from "../support/schema-v1.mjs";
 import { V2_SCHEMA_DDL } from "../support/schema-v2.mjs";
 import { V3_SCHEMA_DDL } from "../support/schema-v3.mjs";
+import { V4_SCHEMA_DDL } from "../support/schema-v4.mjs";
 
 const CREATED = "2026-09-20T10:00:00.000Z";
 const CHECKPOINT_STATE = { sections: ["intro", "risks"], progress: 0.5 };
@@ -79,13 +80,13 @@ function createV1Store(dir) {
   db.close();
 }
 
-test("a real v1 store migrates through v2 and v3 to v4 and keeps every value", () => {
+test("a real v1 store migrates through v2, v3 and v4 to v5 and keeps every value", () => {
   const dir = tempStoreDir();
   try {
     createV1Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 4);
+    assert.equal(kernel.status().schemaVersion, 5);
     assert.deepEqual(kernel.company("cmp_legacy"), {
       id: "cmp_legacy",
       name: "Legacy Ltd",
@@ -149,7 +150,7 @@ test("a real v1 store migrates through v2 and v3 to v4 and keeps every value", (
 
     // Reopening a v2 store does not migrate again and loses nothing.
     const again = openKernel({ dir });
-    assert.equal(again.status().schemaVersion, 4);
+    assert.equal(again.status().schemaVersion, 5);
     assert.equal(again.status().counts.companies, 1);
     assert.equal(again.status().counts.artifacts, 1);
     assert.equal(again.workerRuns({ taskId: "tsk_legacy" }).length, 1);
@@ -236,13 +237,13 @@ function createV2Store(dir) {
   db.close();
 }
 
-test("a real v2 store migrates through v3 to v4 and keeps every v0B1 fact", () => {
+test("a real v2 store migrates through v3 and v4 to v5 and keeps every v0B1 fact", () => {
   const dir = tempStoreDir();
   try {
     createV2Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 4);
+    assert.equal(kernel.status().schemaVersion, 5);
     assert.deepEqual(kernel.position("pos_v0b1"), {
       id: "pos_v0b1",
       companyId: "cmp_v0b1",
@@ -489,13 +490,13 @@ function createV3Store(dir) {
   db.close();
 }
 
-test("a real v3 store migrates to v4, keeps every v0B2 fact, and still has no decision", () => {
+test("a real v3 store migrates through v4 to v5, keeps every v0B2 fact, and still has no decision", () => {
   const dir = tempStoreDir();
   try {
     createV3Store(dir);
     const kernel = openKernel({ dir });
 
-    assert.equal(kernel.status().schemaVersion, 4);
+    assert.equal(kernel.status().schemaVersion, 5);
     assert.equal(kernel.recovery.count, 0, "a finished v0B2 work hides no running attempt");
 
     // Every v0B2 fact survived the migration untouched.
@@ -549,7 +550,7 @@ test("a real v3 store migrates to v4, keeps every v0B2 fact, and still has no de
 
     // Reopening migrates nothing again, and the decision is still there.
     const reopened = openKernel({ dir });
-    assert.equal(reopened.status().schemaVersion, 4);
+    assert.equal(reopened.status().schemaVersion, 5);
     assert.equal(reopened.status().counts.founderDecisions, 1);
     assert.equal(reopened.workProjection("wrk_v0b2").outcome.state, "ACCEPTED");
     assert.equal(reopened.workProjection("wrk_v0b2").founderAttention.item, null);
@@ -559,7 +560,118 @@ test("a real v3 store migrates to v4, keeps every v0B2 fact, and still has no de
   }
 });
 
-test("an unknown future schema version still fails clearly after v4 exists", () => {
+
+// Builds a real v4 store: the shipped v0B3 schema, version 4, and rows a v0B3
+// runtime would have written — including the immutable Founder Decision.
+function createV4Store(dir) {
+  const db = new DatabaseSync(join(dir, STORE_FILE_NAME));
+  db.exec(V4_SCHEMA_DDL);
+  db.prepare("INSERT INTO schema_meta(version) VALUES(?)").run(4);
+  db.prepare("INSERT INTO companies(id,name,created_at) VALUES(?,?,?)").run(
+    "cmp_v0b3",
+    "Decision Ltd",
+    CREATED,
+  );
+  db.prepare("INSERT INTO works(id,company_id,title,intent,created_at) VALUES(?,?,?,?,?)").run(
+    "wrk_v0b3",
+    "cmp_v0b3",
+    "Decided work",
+    "Why it exists",
+    CREATED,
+  );
+  db.prepare(
+    "INSERT INTO tasks(id,work_id,title,intent,state,generation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+  ).run("tsk_v0b3", "wrk_v0b3", "Produce the analysis", "One output", "COMPLETED", 1, CREATED, CREATED);
+  db.prepare(
+    "INSERT INTO artifacts(id,company_id,work_id,task_id,generation,kind,title,content,content_digest,input_digest,created_at,worker_run_id,supersedes_artifact_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  ).run(
+    "art_v0b3",
+    "cmp_v0b3",
+    "wrk_v0b3",
+    "tsk_v0b3",
+    1,
+    "document",
+    "Accepted analysis",
+    "the accepted text\n",
+    "sha256:v0b3",
+    null,
+    CREATED,
+    null,
+    null,
+  );
+  const insertActivity = db.prepare(
+    "INSERT INTO activity(company_id,work_id,task_id,generation,kind,detail,created_at) VALUES(?,?,?,?,?,?,?)",
+  );
+  insertActivity.run("cmp_v0b3", "wrk_v0b3", "tsk_v0b3", null, "task.created", "{}", CREATED);
+  insertActivity.run("cmp_v0b3", "wrk_v0b3", "tsk_v0b3", 1, "artifact.recorded", "{}", CREATED);
+  insertActivity.run("cmp_v0b3", "wrk_v0b3", "tsk_v0b3", null, "task.completed", "{}", CREATED);
+  insertActivity.run("cmp_v0b3", "wrk_v0b3", "tsk_v0b3", null, "WORK_ACCEPTED", "{}", CREATED);
+  db.prepare(
+    "INSERT INTO founder_decisions(id,company_id,work_id,disposition,artifact_id,artifact_digest,basis_sequence,created_at) VALUES(?,?,?,?,?,?,?,?)",
+  ).run("dec_v0b3", "cmp_v0b3", "wrk_v0b3", "ACCEPT", "art_v0b3", "sha256:v0b3", 4, CREATED);
+  db.close();
+}
+
+test("a real v4 store migrates to v5, keeps every v0B3 fact, and starts with no trace", () => {
+  const dir = tempStoreDir();
+  try {
+    createV4Store(dir);
+    const kernel = openKernel({ dir });
+
+    assert.equal(kernel.status().schemaVersion, 5);
+    assert.equal(kernel.recovery.count, 0);
+
+    // Every v0B3 fact survived: the decision is still the immutable record it
+    // was, and the Work still reads as accepted.
+    assert.equal(kernel.status().counts.founderDecisions, 1);
+    assert.equal(kernel.status().counts.continuationTraces, 0);
+    const decision = kernel.store.founderDecisionForWork("wrk_v0b3");
+    assert.equal(decision.artifactId, "art_v0b3");
+    assert.equal(decision.disposition, "ACCEPT");
+    const projection = kernel.workProjection("wrk_v0b3");
+    assert.equal(projection.outcome.state, "ACCEPTED");
+    assert.equal(projection.outcome.accepted.decisionId, "dec_v0b3");
+    assert.equal(projection.founderAttention.item, null);
+
+    // Migration is additive: absence of traces is the absence of history, not a
+    // backfilled guess.
+    assert.deepEqual(kernel.continuationTraces({ workId: "wrk_v0b3" }), []);
+
+    // The new table is usable and append-only from the first write.
+    const trace = kernel.recordContinuationTrace({
+      companyId: "cmp_v0b3",
+      workId: "wrk_v0b3",
+      step: 1,
+      triggerType: "STARTUP",
+      basisBefore: 4,
+      basisAfter: 4,
+      policyVersion: "v0b4.1",
+      reasonCodes: ["ACCEPTED"],
+      actionResult: "SKIPPED",
+    });
+    assert.equal(trace.sensorName, null, "v0B4 integrates no sensor and records none");
+    assert.equal(kernel.continuationTraces({ workId: "wrk_v0b3" }).length, 1);
+    assert.throws(
+      () =>
+        kernel.store.db
+          .prepare("UPDATE continuation_traces SET action_result='EXECUTED' WHERE id=?")
+          .run(trace.id),
+      /CONTINUATION_TRACE_APPEND_ONLY/,
+      "a trace is history, and history is not rewritten",
+    );
+
+    kernel.close();
+    const reopened = openKernel({ dir });
+    assert.equal(reopened.status().schemaVersion, 5);
+    assert.equal(reopened.status().counts.continuationTraces, 1);
+    assert.equal(reopened.workProjection("wrk_v0b3").outcome.state, "ACCEPTED");
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown future schema version still fails clearly after v5 exists", () => {
   const dir = tempStoreDir();
   try {
     const db = new DatabaseSync(join(dir, STORE_FILE_NAME));

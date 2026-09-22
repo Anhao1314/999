@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -248,6 +248,45 @@ CREATE TRIGGER IF NOT EXISTS founder_decisions_no_delete BEFORE DELETE ON founde
   BEGIN SELECT RAISE(ABORT,'DECISION_IMMUTABLE'); END;
 `;
 
+// v0B4 additions (schema v5): the Continuation Trace — append-only
+// observability for one Driver step. No status column, no queue, no backfill:
+// a store that predates v0B4 simply has no traces, and absence is how "this
+// step was never taken" is represented.
+const V5_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS continuation_traces(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  work_id TEXT NOT NULL REFERENCES works(id),
+  step INTEGER NOT NULL,
+  trigger_type TEXT NOT NULL CHECK (trigger_type IN ('COMMAND','STARTUP','EXPLICIT','WAKE')),
+  basis_before INTEGER,
+  basis_after INTEGER,
+  decision_state_digest TEXT,
+  decision_state TEXT,
+  policy_version TEXT NOT NULL,
+  reason_codes TEXT NOT NULL,
+  diagnostic_code TEXT,
+  action_command TEXT,
+  action_target_id TEXT,
+  action_result TEXT NOT NULL CHECK (action_result IN ('EXECUTED','NO_OP','REFUSED','STALE','SKIPPED','DIAGNOSTIC')),
+  action_error_code TEXT,
+  sensor_name TEXT,
+  sensor_version TEXT,
+  signals_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS continuation_traces_by_work
+  ON continuation_traces(work_id, sequence);
+`;
+
+const V5_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS continuation_traces_no_update BEFORE UPDATE ON continuation_traces
+  BEGIN SELECT RAISE(ABORT,'CONTINUATION_TRACE_APPEND_ONLY'); END;
+CREATE TRIGGER IF NOT EXISTS continuation_traces_no_delete BEFORE DELETE ON continuation_traces
+  BEGIN SELECT RAISE(ABORT,'CONTINUATION_TRACE_APPEND_ONLY'); END;
+`;
+
 const rowToCompany = (row) =>
   row && { id: row.id, name: row.name, createdAt: row.created_at };
 
@@ -423,6 +462,30 @@ const rowToFounderDecision = (row) =>
     createdAt: row.created_at,
   };
 
+const rowToContinuationTrace = (row) =>
+  row && {
+    id: row.id,
+    companyId: row.company_id,
+    workId: row.work_id,
+    step: row.step,
+    triggerType: row.trigger_type,
+    basisBefore: row.basis_before ?? null,
+    basisAfter: row.basis_after ?? null,
+    decisionStateDigest: row.decision_state_digest ?? null,
+    decisionState: row.decision_state ? JSON.parse(row.decision_state) : null,
+    policyVersion: row.policy_version,
+    reasonCodes: JSON.parse(row.reason_codes),
+    diagnosticCode: row.diagnostic_code ?? null,
+    actionCommand: row.action_command ?? null,
+    actionTargetId: row.action_target_id ?? null,
+    actionResult: row.action_result,
+    actionErrorCode: row.action_error_code ?? null,
+    sensorName: row.sensor_name ?? null,
+    sensorVersion: row.sensor_version ?? null,
+    signals: row.signals_json ? JSON.parse(row.signals_json) : null,
+    createdAt: row.created_at,
+  };
+
 export class KernelStore {
   constructor(dir) {
     mkdirSync(dir, { recursive: true });
@@ -455,6 +518,8 @@ export class KernelStore {
       this.transaction(() => this.#migrateV2ToV3());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 3)
       this.transaction(() => this.#migrateV3ToV4());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 4)
+      this.transaction(() => this.#migrateV4ToV5());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
     throw kernelError(
@@ -512,6 +577,13 @@ export class KernelStore {
   #migrateV3ToV4() {
     this.db.exec(V4_TABLES_SQL + V4_TRIGGERS_SQL);
     this.db.prepare("UPDATE schema_meta SET version=?").run(4);
+  }
+
+  // Explicit v4 → v5 migration: the Continuation Trace table. Purely
+  // additive, nothing is deleted, recreated or backfilled.
+  #migrateV4ToV5() {
+    this.db.exec(V5_TABLES_SQL + V5_TRIGGERS_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(5);
   }
 
   get schemaVersion() {
@@ -1129,6 +1201,52 @@ export class KernelStore {
     );
   }
 
+  // --- continuation traces (v0B4) -------------------------------------------
+
+  insertContinuationTrace(trace) {
+    this.db
+      .prepare(
+        "INSERT INTO continuation_traces(id,company_id,work_id,step,trigger_type,basis_before,basis_after,decision_state_digest,decision_state,policy_version,reason_codes,diagnostic_code,action_command,action_target_id,action_result,action_error_code,sensor_name,sensor_version,signals_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        trace.id,
+        trace.companyId,
+        trace.workId,
+        trace.step,
+        trace.triggerType,
+        trace.basisBefore,
+        trace.basisAfter,
+        trace.decisionStateDigest,
+        trace.decisionState === null ? null : JSON.stringify(trace.decisionState),
+        trace.policyVersion,
+        JSON.stringify(trace.reasonCodes),
+        trace.diagnosticCode,
+        trace.actionCommand,
+        trace.actionTargetId,
+        trace.actionResult,
+        trace.actionErrorCode,
+        trace.sensorName,
+        trace.sensorVersion,
+        trace.signals === null ? null : JSON.stringify(trace.signals),
+        trace.createdAt,
+      );
+    return trace;
+  }
+
+  listContinuationTraces({ workId = null, limit = 100 } = {}) {
+    const clauses = [];
+    const values = [];
+    if (workId) {
+      clauses.push("work_id=?");
+      values.push(workId);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM continuation_traces${where} ORDER BY sequence LIMIT ?`)
+      .all(...values, limit)
+      .map(rowToContinuationTrace);
+  }
+
   counts() {
     const count = (table) =>
       this.db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
@@ -1146,6 +1264,7 @@ export class KernelStore {
       reviewRequests: count("review_requests"),
       repairBindings: count("repair_bindings"),
       founderDecisions: count("founder_decisions"),
+      continuationTraces: count("continuation_traces"),
       activity: count("activity"),
     };
   }

@@ -16,6 +16,9 @@ const STATUS_BY_CODE = Object.freeze({
   SUPERSEDES_NOT_FOUND: 404,
   ROUTE_NOT_FOUND: 404,
   INVALID_TRANSITION: 409,
+  REVIEWER_NOT_INDEPENDENT: 409,
+  WORK_ALREADY_ACTIVATED: 409,
+  STALE_CONTINUATION_BASIS: 409,
   STALE_GENERATION: 409,
   TASK_NOT_RUNNING: 409,
   TASK_HAS_NO_ARTIFACT: 409,
@@ -39,6 +42,7 @@ const STATUS_BY_CODE = Object.freeze({
   SUPERSEDES_REQUIRED: 409,
   SUPERSEDES_NOT_ALLOWED: 409,
   INVALID_CAPABILITY: 400,
+  INVALID_PROPOSAL: 400,
   INVALID_VERDICT: 400,
   INVALID_DECISION_BASIS: 400,
   FOUNDER_DECISION_NOT_FOUND: 404,
@@ -58,11 +62,15 @@ const STATUS_BY_CODE = Object.freeze({
 });
 
 export class KernelError extends Error {
-  constructor(code, message, { status, cause } = {}) {
+  constructor(code, message, { status, cause, details } = {}) {
     super(message, { cause });
     this.name = "KernelError";
     this.code = code;
     this.status = status ?? STATUS_BY_CODE[code] ?? 500;
+    // Structured, non-authoritative context a caller may read instead of
+    // parsing the message (v0B4: a refused materialization carries the Task
+    // that already exists). It is never a second source of truth.
+    this.details = details ?? null;
   }
 }
 

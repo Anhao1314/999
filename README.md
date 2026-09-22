@@ -44,27 +44,44 @@ Review 不可能自动变成接受，接受也不会写入 Knowledge。Work 的 
 `READY_FOR_DECISION`：`ACCEPT` 是动作，`ACCEPTED` 是状态。store 已是 schema v4，
 v1/v2/v3 旧 store 会逐级迁移（v1 → v2 → v3 → v4）且不做任何历史回填。
 
+v0B4 把"调度团队"这一段也交还给 Runtime：Continuation Driver 是一个**无状态执行器**
+（读真相 → 选一个合法动作 → 跑一条命令 → 重新读），没有时钟、没有队列、没有调度策略；
+每次迭代最多提交一次业务写入（`MAX_CONTINUATION_STEPS = 16` 是循环保险丝）。协调规则
+冻结在 Work Continuity v0B4 契约里：eligibility（组织能力事实）≠ dispatchability
+（此刻能否自动开工），BUSY 不等于能力缺口（`NO_DISPATCHABLE_EMPLOYEE`）；Reviewer
+独立性（reviewer ≠ 该 Artifact 的 producer）在 `assignTask` 与 `startWorkerRun` 两处
+fail-closed 强制；`WORK_ALREADY_ACTIVATED` 是良性收敛而不是失败。跨 Work 的唤醒只是
+"公司人力事实变了（run 结束 / enabled 变化 / 新员工）→ 重新读真相"的信号：不写别的
+Work 的 Activity、不推进它的 basis、没有持久队列、没有 event bus。新增 append-only 的
+`continuation_traces`（仅供观测，永不作为决策输入）；store 已是 schema v5，v1–v4 旧
+store 会逐级迁移（v1 → v2 → v3 → v4 → v5）且不做任何历史回填。
+
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
   [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md) ·
   [Review / Repair Collaboration v0B2](docs/contracts/review-repair-collaboration-v0.md) ·
-  [Founder Attention & Acceptance v0B3](docs/contracts/founder-attention-acceptance-v0.md)
+  [Founder Attention & Acceptance v0B3](docs/contracts/founder-attention-acceptance-v0.md) ·
+  [Work Continuity v0B4](docs/contracts/work-continuity-v0.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
-  `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs`
-- 还没有 UI、没有 Canvas、没有模型调用、没有 dispatcher；Hiring / Genesis 未开始。
+  `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
+  `node scripts/demo-work-continuity-v0b4.mjs`
+- 还没有 UI、没有 Canvas、没有模型调用；协调由确定性的 Continuation Driver 完成（不是
+  scheduler / event bus / 持久队列），Hiring / Genesis 未开始。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
-都还没有实现——Kernel 只是它们共同的 Runtime 地基。v0B3 之后，AI Workforce MVP 的
-协议闭环（Work → 执行 → Review → Repair → Review → Founder ACCEPT）已经打通，
-但**还没有宣布 PASS**：仍有一个 closure gate ——
+都还没有实现——Kernel 只是它们共同的 Runtime 地基，还没有真实模型执行。
+
+v0B3 记录了一个 **AI Workforce MVP closure gate**：
 
 > Founder 建好 Work 之后，能否不亲自做日常协调，一直等到 FlowCredit 合理地需要他？
 
-今天 Runtime 里**没有 dispatcher**：普通 Task 的指派与启动、Review 的指派、Repair 的
-协调仍然要 Founder 手动触发（`assignTask` / `startWorkerRun` / `createRepairTask`）。
-这与"Founder 组建团队，FlowCredit 调度团队"的冻结原则之间的差距，是一个已记录的
-**AI Workforce MVP closure gate**，而不是 v0B3 的实现内容——v0B3 不包含 scheduler、
-capability ranking、DAG planner、Dynamic Swarm 或 Hiring。历史能力仍留在旧的 R&D 仓库
-（见下），迁移遵循 capability by capability，不整目录复制。
+**v0B4 关闭了这个 gate**：`FLOWCREDIT_COORDINATION=driver` 时，普通 Task 的指派与启动、
+Review 的指派、Repair 的协调都由 Runtime 的 Continuation Driver 逐步完成；Scenario 1 /
+Scenario 2 实测 Founder Extra Touch 与 Manual Coordination 均为 **0**。这个结果的名字是
+`Deterministic Workforce Coordination Closure = PASS`，**不是**"完整产品自主"——真实执行
+仍需要 execution adapter / System 2 接入，所以 MVP 2 还没有宣布 PASS。v0B4 不包含
+scheduler、capability ranking、DAG planner、Dynamic Swarm、Hiring 或 Knowledge
+Admission；历史能力仍留在旧的 R&D 仓库（见下），迁移遵循 capability by capability，
+不整目录复制。
 
 ## The three core MVPs
 
@@ -104,12 +121,14 @@ node scripts/demo-work-kernel.mjs   # 持久化与恢复演示（真实进程，
 node scripts/demo-workforce-v0b1.mjs # 派工演示：员工身份跨崩溃存活，Artifact 指明 producer
 node scripts/demo-review-repair-v0b2.mjs # 协作演示：Review → Repair → 再次 Review → PASS
 node scripts/demo-founder-acceptance-v0b3.mjs # 接受演示：Founder Attention → ACCEPT → ACCEPTED（含硬重启）
+node scripts/demo-work-continuity-v0b4.mjs # 协调演示：Driver 自动派工/开工/Review/Repair（0 手动协调 + 跨 Work 唤醒）
 node apps/runtime/server.mjs        # 以长期进程方式启动 Kernel
 ```
 
 服务进程读取 `FLOWCREDIT_RUNTIME_DIR`（store 目录）与 `FLOWCREDIT_PORT`
-（默认 `0` = 临时端口，只监听 `127.0.0.1`）。零运行时依赖，尚未安装任何 SDK、
-框架或模型客户端。
+（默认 `0` = 临时端口，只监听 `127.0.0.1`），以及 `FLOWCREDIT_COORDINATION`
+（默认 `off`；设为 `driver` 时启动 Continuation Driver：启动后 drive 一次，
+并在每个命令提交后唤醒）。零运行时依赖，尚未安装任何 SDK、框架或模型客户端。
 
 ## Relationship to the old worklab repository
 
@@ -129,11 +148,13 @@ docs/architecture/原则与对象模型
 docs/contracts/   Persistent Work Kernel v0A 契约
                    / Workforce v0B1 契约 / Review & Repair v0B2 契约
                    / Founder Attention & Acceptance v0B3 契约
+                   / Work Continuity v0B4 契约（Continuation Driver）
 docs/migration/   旧仓库能力迁移清单与 provenance
-packages/         company（公司根对象）/ work（Work、Task、生命周期、协作与 outcome 投影）/
-                  decision（Founder Decision 记录）/
-                  workforce（Position、Employee、Assignment、WorkerRun、Work Packet）/
-                  runtime（命令、存储、schema 迁移）
+packages/         company（公司根对象）/ work（Work、Task、生命周期、协作、outcome 与
+                  Continuation Policy 投影）/ decision（Founder Decision 记录）/
+                  planning（确定性 NextActionProposer）/ workforce（Position、Employee、
+                  Assignment、WorkerRun、Work Packet、dispatchability）/
+                  runtime（命令、存储、schema 迁移、Continuation Driver）
 apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam + Founder Attention 读取）
 fixtures/         种子数据（system workforce roster），不属于核心语言
 scripts/          check、重启演示与进程 harness

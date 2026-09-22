@@ -1,4 +1,4 @@
-// Minimal runtime process for the Persistent Work Kernel (v0A → v0B3).
+// Minimal runtime process for the Persistent Work Kernel (v0A → v0B4).
 //
 // Purpose: prove the kernel can be hosted as a long-lived process, and give the
 // restart tests and the demonstrations a real process to kill. It is a kernel
@@ -8,22 +8,39 @@
 //
 //   FLOWCREDIT_RUNTIME_DIR  store directory (default: ./.runtime/kernel)
 //   FLOWCREDIT_PORT         port on 127.0.0.1 (default: 0 = ephemeral)
+//   FLOWCREDIT_COORDINATION `driver` installs the Continuation Driver inside
+//                           this process: committed changes wake it, and every
+//                           non-terminal Work is driven once after recovery.
+//                           `off` (default) leaves the kernel exactly as v0A–v0B3
+//                           describe it. The host decides; the kernel never
+//                           drives itself, and `driveWork` stays available as
+//                           an explicit command either way.
 //
 // Routes: GET /health, GET /status, GET /companies, GET /companies/:id,
 //         GET /companies/:id/works, GET /companies/:id/positions,
 //         GET /companies/:id/employees, GET /companies/:id/attention,
-//         GET /employees/:id, GET /works/:id, GET /tasks/:id, GET /runs/:id,
+//         GET /employees/:id, GET /works/:id, GET /works/:id/tasks,
+//         GET /works/:id/traces, GET /tasks/:id, GET /runs/:id,
 //         GET /reviews/:id, GET /artifacts/:id, GET /review-requests/:id,
 //         GET /repair-bindings/:id,
 //         POST /commands { command, input }.
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
-import { openKernel } from "../../packages/runtime/index.mjs";
+import { createContinuationDriver, openKernel } from "../../packages/runtime/index.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
 const PORT = Number(process.env.FLOWCREDIT_PORT ?? 0);
 const BODY_LIMIT = 1024 * 1024;
+
+const COORDINATION_MODES = Object.freeze(["driver", "off"]);
+const COORDINATION = process.env.FLOWCREDIT_COORDINATION ?? "off";
+if (!COORDINATION_MODES.includes(COORDINATION)) {
+  process.stderr.write(
+    `FLOWCREDIT_COORDINATION must be one of ${COORDINATION_MODES.join(" | ")} (got ${COORDINATION})\n`,
+  );
+  process.exit(1);
+}
 
 const COMMANDS = Object.freeze({
   createCompany: (kernel, input) => kernel.createCompany(input),
@@ -45,11 +62,17 @@ const COMMANDS = Object.freeze({
   submitReview: (kernel, input) => kernel.submitReview(input),
   createRepairTask: (kernel, input) => kernel.createRepairTask(input),
   acceptWork: (kernel, input) => kernel.acceptWork(input),
+  materializeNextAction: (kernel, input) => kernel.materializeNextAction(input),
+  driveWork: (kernel, input) => driver.driveWork(input.workId, { triggerType: "EXPLICIT" }),
   bootstrapWorkforce: (kernel, input) => kernel.bootstrapWorkforce(input),
   recover: (kernel) => kernel.recover(),
 });
 
 const kernel = openKernel({ dir: DIR });
+// The host's choice, made once, visible in one place: whether this process lets
+// the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
+// this observer, and the deterministic NextActionProposer behind it.
+const driver = createContinuationDriver({ kernel, observe: COORDINATION === "driver" });
 
 function send(response, status, payload) {
   const body = JSON.stringify(payload);
@@ -63,7 +86,11 @@ function send(response, status, payload) {
 function sendError(response, error) {
   if (isKernelError(error))
     return send(response, error.status, {
-      error: { code: error.code, message: error.message },
+      error: {
+        code: error.code,
+        message: error.message,
+        ...(error.details ? { details: error.details } : {}),
+      },
     });
   process.stderr.write(`kernel error: ${error?.message ?? error}\n`);
   return send(response, 500, {
@@ -133,6 +160,18 @@ async function handle(request, response) {
   if (request.method === "GET" && segments[0] === "works" && segments.length === 2)
     return send(response, 200, kernel.workProjection(segments[1]));
 
+  if (request.method === "GET" && segments[0] === "works" && segments[2] === "tasks")
+    return send(response, 200, { tasks: kernel.tasks(segments[1]) });
+
+  // Observability, read explicitly: a trace never appears inside a projection.
+  if (request.method === "GET" && segments[0] === "works" && segments[2] === "traces")
+    return send(response, 200, {
+      traces: kernel.continuationTraces({
+        workId: segments[1],
+        limit: Number(url.searchParams.get("limit") ?? 100),
+      }),
+    });
+
   if (request.method === "GET" && segments[0] === "tasks" && segments.length === 2)
     return send(response, 200, kernel.taskDetail(segments[1]));
 
@@ -194,6 +233,9 @@ const server = createServer((request, response) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   const { port } = server.address();
+  // The startup seam: after recovery, every non-terminal Work is driven once,
+  // before this process announces that it is ready.
+  if (COORDINATION === "driver") driver.driveAll({ triggerType: "STARTUP" });
   if (kernel.recovery.count > 0)
     process.stdout.write(
       `recovered ${kernel.recovery.count} interrupted execution(s): ${kernel.recovery.interrupted

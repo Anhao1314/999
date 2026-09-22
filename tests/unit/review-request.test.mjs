@@ -139,7 +139,9 @@ test("the reviewer is an ordinary assignment and run, and its packet names the a
       generation: fixture.generation,
     });
 
-    // A position that cannot review is refused by the ordinary requirement check.
+    // The producer is refused before any capability question is asked: since
+    // v0B4, independence from the Artifact under review is a hard Runtime rule,
+    // not a convention about which position carries which capability.
     assert.throws(
       () =>
         kernel.assignTask({
@@ -147,8 +149,8 @@ test("the reviewer is an ordinary assignment and run, and its packet names the a
           employeeId: fixture.producer.id,
           reason: "wrong employee",
         }),
-      { code: "TASK_REQUIREMENTS_UNSATISFIED" },
-      "the producer's position does not carry the review capability",
+      { code: "REVIEWER_NOT_INDEPENDENT" },
+      "the producer of the artifact never reviews it",
     );
 
     const started = startReviewRun(kernel, {

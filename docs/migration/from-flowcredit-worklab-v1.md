@@ -171,6 +171,14 @@ real-process hard restart in `tests/integration/restart.test.mjs` ("a Founder
 Decision survives a hard restart and is never re-adjudicated"). The whole path is
 printed by `scripts/demo-founder-acceptance-v0b3.mjs`.
 
+**Follow-on note (Work Continuity v0B4).** The "no dispatcher" gap recorded above was
+closed inside this repository by the frozen
+[Work Continuity v0B4](../contracts/work-continuity-v0.md) contract
+(`Deterministic Workforce Coordination Closure = PASS`). It adds no row to the
+capability manifest: it is contract-derived work in this repository, not an extraction
+from A or B. Founder Attention keeps its v0B3 shape; the Driver holds no truth, and a
+cross-Work wake is a re-evaluation signal, never a Work mutation.
+
 ## Provenance policy
 
 Every future extraction adds a row (or updates one) with:

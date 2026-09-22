@@ -22,6 +22,8 @@ import {
 } from "../work/collaboration.mjs";
 import { deriveWorkAttention, sortAttentionItems } from "../work/attention.mjs";
 import { deriveOutcome } from "../work/outcome.mjs";
+import { WAKE_CAUSES, validateNextActionProposal } from "../work/continuation.mjs";
+import { newContinuationTrace } from "../work/trace.mjs";
 import {
   FOUNDER_DECISION_DISPOSITIONS,
   newFounderDecision,
@@ -77,11 +79,27 @@ const RUN_END_EVENT_KIND = Object.freeze({
 });
 
 export class WorkKernel {
+  // Notices for the transaction in flight; null outside a command.
+  #notices = null;
+
   constructor({ dir, now = () => new Date().toISOString() }) {
     this.store = new KernelStore(dir);
     this.now = now;
     this.openedAt = this.now();
+    // Committed-fact notices collected by the running command, published only
+    // after COMMIT (v0B4 §8). Never a queue: it lives for one transaction.
+    this.#notices = null;
+    this.continuationObserver = null;
     this.recovery = this.#recoverOpenAttempts();
+  }
+
+  // The one host seam of v0B4: after a command's transaction commits, the
+  // Runtime hands the committed facts to whoever runs the Continuation Driver.
+  // The Kernel detects; the Driver decides. Nothing is published while a
+  // transaction is open, and a rolled-back command publishes nothing at all.
+  setContinuationObserver(observer) {
+    this.continuationObserver = typeof observer === "function" ? observer : null;
+    return this;
   }
 
   close() {
@@ -155,7 +173,7 @@ export class WorkKernel {
     });
     if (this.store.getEmployee(employee.id))
       throw kernelError("EMPLOYEE_EXISTS", `employee ${employee.id} already exists`);
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertEmployee(employee);
       this.#event({
         companyId: company,
@@ -167,6 +185,9 @@ export class WorkKernel {
           enabled: employee.enabled,
         },
       });
+      // A new Employee can change what already-active Works can dispatch,
+      // without any of those Works changing. Recomputation, not Hiring.
+      this.#notify({ cause: WAKE_CAUSES.EMPLOYEE_CREATED, companyId: company, companyWide: true });
     });
     return employee;
   }
@@ -175,12 +196,19 @@ export class WorkKernel {
     const employee = this.#requireEmployee(employeeId);
     const next = assertEnabled(enabled, "enabled");
     if (employee.enabled === next) return this.employee(employee.id);
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.updateEmployeeEnabled(employee.id, next);
       this.#event({
         companyId: employee.companyId,
         kind: "EMPLOYEE_UPDATED",
         detail: { employeeId: employee.id, enabled: next },
+      });
+      // Both directions matter: enabling can unlock blocked Work, disabling can
+      // make an existing Assignment unusable. A no-op change never gets here.
+      this.#notify({
+        cause: WAKE_CAUSES.EMPLOYEE_ENABLED_CHANGED,
+        companyId: employee.companyId,
+        companyWide: true,
       });
     });
     return this.employee(employee.id);
@@ -212,7 +240,7 @@ export class WorkKernel {
         : assertCapabilityList(reviewCapabilities, "reviewCapabilities"),
       existing,
     );
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.upsertTaskRequirements(requirements);
       const { companyId, workId } = this.#contextOfTask(task);
       this.#event({
@@ -251,6 +279,17 @@ export class WorkKernel {
       );
     if (!employee.enabled)
       throw kernelError("EMPLOYEE_DISABLED", `employee ${employee.id} is disabled`);
+    // A Review Task carries a hard independence rule (v0B4 §4): the reviewer
+    // must not be the Employee who produced the exact Artifact under review.
+    // Checked before anything else about the candidate, so the refusal names
+    // the real reason: Assignment is durable, and it is checked again before
+    // the run starts — a hand-written or migrated Assignment must never execute.
+    const producerEmployeeId = this.#reviewProducerEmployeeId(task);
+    if (producerEmployeeId === employee.id)
+      throw kernelError(
+        "REVIEWER_NOT_INDEPENDENT",
+        `employee ${employee.id} produced the artifact review task ${task.id} judges; an Employee never reviews their own output`,
+      );
     const position = this.#requirePosition(employee.positionId);
     const requirements = this.store.getTaskRequirements(task.id);
     const missing = missingCapabilities(
@@ -273,7 +312,7 @@ export class WorkKernel {
           : assertText(reason, "reason", BOUNDS.assignmentReasonMax, { min: 0 }),
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertAssignment(assignment);
       this.#event({
         companyId,
@@ -297,7 +336,7 @@ export class WorkKernel {
       name: assertText(name, "name", BOUNDS.companyNameMax),
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertCompany(company);
       this.#event({
         companyId: company.id,
@@ -321,7 +360,7 @@ export class WorkKernel {
       intent: assertText(intent, "intent", BOUNDS.workIntentMax),
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertWork(work);
       this.#event({
         companyId: work.companyId,
@@ -357,7 +396,7 @@ export class WorkKernel {
             assertCapabilityList(requiredCapabilities, "requiredCapabilities"),
             [],
           );
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertTask(task);
       this.#event({
         companyId: work.companyId,
@@ -380,6 +419,97 @@ export class WorkKernel {
     return task;
   }
 
+
+  // The one Runtime authority seam the Continuation Driver uses to turn a
+  // validated proposal into facts (v0B4 §5). It creates exactly ONE Task and
+  // its requirements, atomically, and does nothing else: no Employee is
+  // chosen, no run starts, no review is submitted, no Work is accepted.
+  //
+  // It is not a planner. The Runtime revalidates the initial-activation
+  // preconditions inside the transaction, so a lost response can never produce
+  // a second initial Task, and a Work that already has a Task is refused as
+  // benign convergence rather than as a failure.
+  materializeNextAction({ workId, expectedBasis, proposal } = {}) {
+    const work = this.#requireWork(workId);
+    const basis = assertInteger(expectedBasis, "expectedBasis", { min: 1 });
+    const validated = validateNextActionProposal(proposal);
+    if (!validated.ok)
+      throw kernelError(validated.code, validated.message, { details: { workId: work.id } });
+    const { taskKind, title, intent, requiredCapabilities, reviewCapabilities } =
+      validated.proposal;
+    const task = newTask({ workId: work.id, title, intent, createdAt: this.now() });
+    const requirements = this.#requirementsRecord(
+      task.id,
+      requiredCapabilities,
+      reviewCapabilities,
+    );
+    this.#mutate(() => {
+      if (this.store.founderDecisionForWork(work.id))
+        throw kernelError(
+          "WORK_ACCEPTED_LOCKED",
+          `work ${work.id} has a Founder Decision; an accepted Work is never activated again`,
+        );
+      const existing = this.store.listTasks(work.id);
+      if (existing.length > 0) {
+        const [first] = existing;
+        throw kernelError(
+          "WORK_ALREADY_ACTIVATED",
+          `work ${work.id} already carries ${existing.length} Task(s) starting at ${first.id}; the initial activation already happened`,
+          {
+            details: {
+              workId: work.id,
+              taskId: first.id,
+              taskCount: existing.length,
+              basis: this.store.workActivityHead(work.id),
+            },
+          },
+        );
+      }
+      const currentBasis = this.store.workActivityHead(work.id);
+      if (currentBasis !== basis)
+        throw kernelError(
+          "STALE_CONTINUATION_BASIS",
+          `work ${work.id} moved from basis ${basis} to ${currentBasis}; a proposal is materialized against the reality it named`,
+          { details: { workId: work.id, basis: currentBasis } },
+        );
+      this.store.insertTask(task);
+      this.#event({
+        companyId: work.companyId,
+        workId: work.id,
+        taskId: task.id,
+        kind: "task.created",
+        detail: { title: task.title, taskKind, materializedFrom: "next_action_proposal" },
+      });
+      this.store.upsertTaskRequirements(requirements);
+      this.#event({
+        companyId: work.companyId,
+        workId: work.id,
+        taskId: task.id,
+        kind: EVENTS.TASK_REQUIREMENTS_SET,
+        detail: { requiredCapabilities, reviewCapabilities },
+      });
+    });
+    return {
+      task: this.task(task.id),
+      requirements,
+      work: this.workProjection(work.id),
+      basis: this.store.workActivityHead(work.id),
+    };
+  }
+
+  // Observability only: appending a trace never changes business truth, and a
+  // trace write can never fail a committed mutation (the Driver calls this
+  // after COMMIT and treats its own failure as an observability failure).
+  recordContinuationTrace(trace) {
+    if (!trace || typeof trace !== "object")
+      throw kernelError("INVALID_INPUT", "a continuation trace must be an object");
+    const record = newContinuationTrace({ ...trace, createdAt: trace.createdAt ?? this.now() });
+    this.#mutate(() => {
+      this.store.insertContinuationTrace(record);
+    });
+    return record;
+  }
+
   startTask({ taskId } = {}) {
     const task = this.#requireTask(taskId);
     if (!startAllowedFrom(task.state))
@@ -388,7 +518,7 @@ export class WorkKernel {
         `a ${task.state} task cannot start an execution attempt`,
       );
     const generation = task.generation + 1;
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.updateTask(task.id, {
         state: TASK_STATES.RUNNING,
         generation,
@@ -426,7 +556,7 @@ export class WorkKernel {
       state,
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertCheckpoint(checkpoint);
       const { companyId, workId } = this.#contextOfTask(task);
       this.#event({
@@ -490,7 +620,7 @@ export class WorkKernel {
       supersedesArtifactId: supersedes,
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertArtifact(artifact);
       const { companyId, workId } = this.#contextOfTask(task);
       this.#event({
@@ -553,7 +683,7 @@ export class WorkKernel {
         "TASK_HAS_NO_ARTIFACT",
         `task ${task.id} has no artifact from generation ${generation}; a completion must name the output it completes`,
       );
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.updateTask(task.id, {
         state: TASK_STATES.COMPLETED,
         generation: task.generation,
@@ -588,7 +718,7 @@ export class WorkKernel {
         : assertText(note, "note", BOUNDS.cancelNoteMax, { min: 0 });
     if (cleanNote) assertNoSecret(cleanNote, "note");
     const generation = task.generation + 1;
-    this.store.transaction(() => {
+    this.#mutate(() => {
       const activeRun = this.#activeRun(task.id);
       this.store.updateTask(task.id, {
         state: TASK_STATES.CANCELLED,
@@ -630,6 +760,15 @@ export class WorkKernel {
       throw kernelError(
         "TASK_NOT_ASSIGNED",
         `task ${task.id} has no assignment; assign an employee before starting a run`,
+      );
+    // Execution revalidates the same rule before anything else: an Assignment
+    // recorded before the rule existed is still only readable history, never an
+    // executable review.
+    const producerEmployeeId = this.#reviewProducerEmployeeId(task);
+    if (producerEmployeeId === assignment.employeeId)
+      throw kernelError(
+        "REVIEWER_NOT_INDEPENDENT",
+        `employee ${assignment.employeeId} produced the artifact review task ${task.id} judges; an Employee never reviews their own output`,
       );
     const employee = this.#requireEmployee(assignment.employeeId);
     if (!employee.enabled)
@@ -673,7 +812,7 @@ export class WorkKernel {
       workPacketDigest: workPacketDigest(packet),
       startedAt,
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.updateTask(task.id, {
         state: TASK_STATES.RUNNING,
         generation,
@@ -728,7 +867,7 @@ export class WorkKernel {
         `task ${task.id} has no artifact from generation ${generation}; a worker completion must name the output it produced`,
       );
     this.#assertReviewNotRequired(task);
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "WORK_COMPLETED");
       this.store.updateTask(task.id, {
         state: TASK_STATES.COMPLETED,
@@ -802,7 +941,7 @@ export class WorkKernel {
       targetArtifactDigest: target.contentDigest,
       createdAt: now,
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "WORK_COMPLETED");
       this.store.updateTask(task.id, {
         state: TASK_STATES.COMPLETED,
@@ -932,7 +1071,7 @@ export class WorkKernel {
       findings: cleanFindings,
       createdAt: this.now(),
     });
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertReview(review);
       this.#endRun(run, WORKER_RUN_STATES.COMPLETED, "REVIEW_COMPLETED");
       this.store.updateTask(task.id, {
@@ -1062,7 +1201,7 @@ export class WorkKernel {
           createdAt: now,
         })
       : null;
-    this.store.transaction(() => {
+    this.#mutate(() => {
       this.store.insertTask(repairTask);
       this.#event({
         companyId,
@@ -1145,7 +1284,7 @@ export class WorkKernel {
 
     let decision = null;
     let idempotent = false;
-    this.store.transaction(() => {
+    this.#mutate(() => {
       const existing = this.store.founderDecisionForWork(work);
       if (existing) {
         if (
@@ -1248,7 +1387,7 @@ export class WorkKernel {
     if (!this.store.getCompany(company))
       throw kernelError("COMPANY_NOT_FOUND", `company ${company} does not exist`);
     const result = { positions: 0, employees: 0, skipped: 0 };
-    this.store.transaction(() => {
+    this.#mutate(() => {
       for (const spec of positions) {
         const desired = {
           id: assertRecordId(spec?.id, "positions[].id"),
@@ -1317,8 +1456,65 @@ export class WorkKernel {
         });
         result.employees += 1;
       }
+      // One company wake for the whole bootstrap, and only when it actually
+      // created Employees: seeding a roster can unblock existing Work.
+      if (result.employees > 0)
+        this.#notify({ cause: WAKE_CAUSES.EMPLOYEE_CREATED, companyId: company, companyWide: true });
     });
     return result;
+  }
+
+  // Every command body runs here: one transaction, and — only after COMMIT
+  // succeeds — the committed facts are published to the continuation observer.
+  // Nested calls belong to the outermost command, which owns the commit.
+  #mutate(fn) {
+    if (this.store.inTransaction) return this.store.transaction(fn);
+    const notices = [];
+    this.#notices = notices;
+    let result;
+    try {
+      result = this.store.transaction(fn);
+    } finally {
+      this.#notices = null;
+    }
+    this.#publish(notices);
+    return result;
+  }
+
+  #notify(notice) {
+    if (this.#notices) this.#notices.push(notice);
+  }
+
+  // One signal per affected Work and one per company-wide cause: a transaction
+  // that completed three runs of one company wakes that company once.
+  #publish(notices) {
+    const observer = this.continuationObserver;
+    if (!observer || notices.length === 0) return;
+    const signals = [];
+    const companies = new Set();
+    const works = new Set();
+    for (const notice of notices) {
+      if (notice.companyWide) {
+        if (companies.has(notice.companyId)) continue;
+        companies.add(notice.companyId);
+        signals.push({ cause: notice.cause, companyId: notice.companyId, workId: null });
+      } else if (notice.workId) {
+        if (works.has(notice.workId)) continue;
+        works.add(notice.workId);
+        signals.push({ cause: notice.cause, companyId: notice.companyId, workId: notice.workId });
+      }
+    }
+    for (const signal of signals) {
+      try {
+        observer(signal);
+      } catch (error) {
+        // Business truth already committed; an observer failure is an
+        // observability failure, never a reason to fail the command.
+        process.stderr.write(
+          `continuation observer failed after commit: ${error?.message ?? error}\n`,
+        );
+      }
+    }
   }
 
   #recoverOpenAttempts() {
@@ -1478,6 +1674,18 @@ export class WorkKernel {
       companyId: companyId ? assertId(companyId, "companyId") : null,
       workId: workId ? assertId(workId, "workId") : null,
       taskId: taskId ? assertId(taskId, "taskId") : null,
+      limit: Math.min(assertInteger(limit, "limit", { min: 1 }), 500),
+    });
+  }
+
+  // The Continuation Trace, read explicitly and never mixed into a Work
+  // projection: it explains how the Runtime got here, it does not say what is
+  // true now (v0B4 §12).
+  continuationTraces({ workId, limit = 100 } = {}) {
+    const id = assertId(workId, "workId");
+    this.#requireWork(id);
+    return this.store.listContinuationTraces({
+      workId: id,
       limit: Math.min(assertInteger(limit, "limit", { min: 1 }), 500),
     });
   }
@@ -1653,6 +1861,18 @@ export class WorkKernel {
       const assignment = this.store.currentAssignment(task.id);
       if (assignment) assignmentsByTask.set(task.id, assignment);
     }
+    // Which Employees are executing right now, and who produced each artifact
+    // under review: Founder Attention needs both to decide what the Runtime can
+    // still continue by itself (v0B4 §11).
+    const activeEmployeeIds = this.store
+      .listActiveWorkerRuns(work.companyId)
+      .map((run) => run.employeeId);
+    const reviewProducerByTask = new Map();
+    for (const request of reviewRequests) {
+      const target = artifacts.find((artifact) => artifact.id === request.targetArtifactId) ?? null;
+      const run = target?.workerRunId ? this.store.getWorkerRun(target.workerRunId) : null;
+      if (run) reviewProducerByTask.set(request.reviewTaskId, run.employeeId);
+    }
     const collaboration = deriveCollaboration({
       tasks,
       reviewRequests,
@@ -1673,6 +1893,8 @@ export class WorkKernel {
       positions: this.store.listPositions(work.companyId),
       requirementsByTask,
       assignmentsByTask,
+      reviewProducerByTask,
+      activeEmployeeIds,
       decisionBasis,
     });
     return {
@@ -1732,6 +1954,14 @@ export class WorkKernel {
       state,
       endedAt: this.now(),
       endReason: reason,
+    });
+    // The single WorkerRun-end seam: ending a run is the one fact that can
+    // change Company workforce availability, so it is detected here and
+    // published only if this transaction commits.
+    this.#notify({
+      cause: WAKE_CAUSES.WORKER_RUN_ENDED,
+      companyId: run.companyId,
+      companyWide: true,
     });
     this.#event({
       companyId: run.companyId,
@@ -1932,5 +2162,24 @@ export class WorkKernel {
         createdAt: this.now(),
       }),
     );
+    // Every Work-scoped fact is appended here, so a committed event is exactly
+    // "this Work changed": the Driver re-reads it after COMMIT.
+    if (workId) this.#notify({ cause: WAKE_CAUSES.WORK_CHANGED, companyId, workId });
+  }
+
+  // The Employee who produced the Artifact a Review Task judges, or null when
+  // the Task is not a review. Fail closed: a review whose producer cannot be
+  // established has no provable independence, so the caller must refuse.
+  #reviewProducerEmployeeId(task) {
+    const request = this.store.reviewRequestForTask(task.id);
+    if (!request) return null;
+    const target = this.store.getArtifact(request.targetArtifactId);
+    const run = target?.workerRunId ? this.store.getWorkerRun(target.workerRunId) : null;
+    if (!run)
+      throw kernelError(
+        "REVIEWER_NOT_INDEPENDENT",
+        `review task ${task.id} has no establishable producer; this Runtime never starts a review whose independence cannot be proven`,
+      );
+    return run.employeeId;
   }
 }
