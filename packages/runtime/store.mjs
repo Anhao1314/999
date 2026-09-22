@@ -877,6 +877,29 @@ export class KernelStore {
       .map(rowToActivity);
   }
 
+  // The same append-only stream read from the newest end. "What just happened"
+  // is a different question from "how did this begin", and answering it from the
+  // oldest rows would quietly lie once a company has history.
+  listRecentActivity({ companyId = null, workId = null, taskId = null, limit = 20 } = {}) {
+    const clauses = [];
+    const values = [];
+    for (const [column, value] of [
+      ["company_id", companyId],
+      ["work_id", workId],
+      ["task_id", taskId],
+    ]) {
+      if (value) {
+        clauses.push(`${column}=?`);
+        values.push(value);
+      }
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.db
+      .prepare(`SELECT * FROM activity${where} ORDER BY sequence DESC LIMIT ?`)
+      .all(...values, limit)
+      .map(rowToActivity);
+  }
+
   // The submission receipt of a WorkerRun, read from the append-only Activity
   // stream. A delivery is rare, so filtering by kind first keeps this bounded
   // by the number of deliveries rather than by the history of the company.

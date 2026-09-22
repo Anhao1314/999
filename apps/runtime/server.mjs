@@ -31,6 +31,10 @@
 //         GET /works/:id/traces, GET /tasks/:id, GET /runs/:id,
 //         GET /reviews/:id, GET /artifacts/:id, GET /review-requests/:id,
 //         GET /repair-bindings/:id,
+//         GET /experience/companies/:id/workspace, /experience/companies/:id/workforce,
+//         GET /experience/employees/:id, GET /experience/works/:id/lineage
+//           (Workforce Experience v0A: derived, bounded, GET-only product
+//            projections — see docs/contracts/workforce-experience-v0.md),
 //         POST /commands { command, input }.
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -43,6 +47,12 @@ import {
   discoverCodexVersion,
 } from "../../packages/harness/index.mjs";
 import { createTestWorkerAdapter } from "../../packages/harness/adapters/test-worker.mjs";
+import {
+  projectEmployeeDetail,
+  projectFounderWorkspace,
+  projectWorkLineage,
+  projectWorkforceLobby,
+} from "../../packages/experience/index.mjs";
 
 const DIR = process.env.FLOWCREDIT_RUNTIME_DIR ?? join(process.cwd(), ".runtime", "kernel");
 const PORT = Number(process.env.FLOWCREDIT_PORT ?? 0);
@@ -174,6 +184,13 @@ function send(response, status, payload) {
 }
 
 function sendError(response, error) {
+  // Experience projections fail with their own bounded, product-facing errors
+  // (a lineage mismatch, for one). They carry an explicit marker so this stays
+  // a whitelist and an unexpected exception still never leaks.
+  if (error?.experience === true)
+    return send(response, error.status ?? 500, {
+      error: { code: error.code ?? "INTERNAL", message: error.message },
+    });
   if (isKernelError(error))
     return send(response, error.status, {
       error: {
@@ -261,6 +278,41 @@ async function handle(request, response) {
         limit: Number(url.searchParams.get("limit") ?? 100),
       }),
     });
+
+  // Workforce Experience v0A: the product read model the Founder Workspace and
+  // the Employee Lobby render from. GET-only, derived from the same Runtime
+  // truth as every route above, and never a second way to change it.
+  if (
+    request.method === "GET" &&
+    segments[0] === "experience" &&
+    segments[1] === "companies" &&
+    segments[3] === "workspace"
+  )
+    return send(response, 200, projectFounderWorkspace({ kernel, companyId: segments[2] }));
+
+  if (
+    request.method === "GET" &&
+    segments[0] === "experience" &&
+    segments[1] === "companies" &&
+    segments[3] === "workforce"
+  )
+    return send(response, 200, projectWorkforceLobby({ kernel, companyId: segments[2] }));
+
+  if (
+    request.method === "GET" &&
+    segments[0] === "experience" &&
+    segments[1] === "employees" &&
+    segments.length === 3
+  )
+    return send(response, 200, projectEmployeeDetail({ kernel, employeeId: segments[2] }));
+
+  if (
+    request.method === "GET" &&
+    segments[0] === "experience" &&
+    segments[1] === "works" &&
+    segments[3] === "lineage"
+  )
+    return send(response, 200, projectWorkLineage({ kernel, workId: segments[2] }));
 
   if (request.method === "GET" && segments[0] === "tasks" && segments.length === 2)
     return send(response, 200, kernel.taskDetail(segments[1]));

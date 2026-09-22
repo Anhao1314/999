@@ -2186,6 +2186,19 @@ export class WorkKernel {
     });
   }
 
+  // Recent Activity, read from the newest end: bounded, in the append order the
+  // stream itself guarantees, and still never a second truth. The Experience
+  // layer needs “what just happened”; the oldest-first read above answers a
+  // different question.
+  recentActivity({ companyId = null, workId = null, taskId = null, limit = 20 } = {}) {
+    return this.store.listRecentActivity({
+      companyId: companyId ? assertId(companyId, "companyId") : null,
+      workId: workId ? assertId(workId, "workId") : null,
+      taskId: taskId ? assertId(taskId, "taskId") : null,
+      limit: Math.min(assertInteger(limit, "limit", { min: 1 }), 500),
+    });
+  }
+
   // The Continuation Trace, read explicitly and never mixed into a Work
   // projection: it explains how the Runtime got here, it does not say what is
   // true now (v0B4 §12).

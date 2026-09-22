@@ -115,6 +115,19 @@ workspace（旧 workspace 被投毒也永不复用）；结果协议非法时 3 
 `REAL_REPAIR_EVIDENCE_NOT_OBSERVED`（协议本身由确定性测试覆盖）。重启、评审与修复
 语义完全复用 v0A–v0B4，Runtime 不受 Codex 影响。
 
+Workforce Experience v0A 是**产品读模型**而不是新 Runtime：`packages/experience/`
+从 Kernel 公开 read seam 派生 Founder Workspace 与 Employee Lobby 需要的内容（Company
+状态、Founder Attention、主 Work lineage、AI Workforce、Recent Deliveries、Company
+Pulse）。availability 冻结为派生的 `AVAILABLE` / `WORKING` / `DISABLED`，当前角色冻结
+为派生的 `EXECUTION` / `REVIEW` / `REPAIR` —— 两者都不存储、不缓存、不猜；执行 backend
+（`backendType` / `backendVersion`）只是执行细节，不是员工身份。四个 GET-only 端点暴露
+这些投影：`/experience/companies/:id/workspace`、`/experience/companies/:id/workforce`、
+`/experience/employees/:id`、`/experience/works/:id/lineage`。读投影不写任何东西、没有
+第二套 lifecycle、没有缓存、没有 Todo 表：读时从 Runtime truth 重新派生，重启后同一
+truth 投影完全一致，未知 id 显式 404。Founder Attention 仍然只是 Runtime projection；
+Reviewer PASS 不会经由此层变成 ACCEPTED。Pixel Lobby（PR #1）**尚未合并、尚未接入**
+Experience API；生产 Founder Workspace UI、Laya / Jev、General A2A 均未开始。
+
 - 契约：[Persistent Work Kernel v0A](docs/contracts/persistent-work-kernel-v0.md) ·
   [Workforce Identity & Assignment v0B1](docs/contracts/workforce-identity-assignment-v0.md) ·
   [Review / Repair Collaboration v0B2](docs/contracts/review-repair-collaboration-v0.md) ·
@@ -122,13 +135,16 @@ workspace（旧 workspace 被投毒也永不复用）；结果协议非法时 3 
   [Work Continuity v0B4](docs/contracts/work-continuity-v0.md) ·
   [Worker Execution Seam v0 (H0.1 + H0.2)](docs/contracts/worker-execution-seam-v0.md) ·
   [Worker Harness v0 (Slice 1.1)](docs/contracts/worker-harness-v0.md) ·
-  [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md)
+  [CodexExecAdapter v1](docs/contracts/codex-exec-adapter-v1.md) ·
+  [Workforce Experience v0](docs/contracts/workforce-experience-v0.md)
 - 演示：`node scripts/demo-work-kernel.mjs` · `node scripts/demo-workforce-v0b1.mjs` ·
   `node scripts/demo-review-repair-v0b2.mjs` · `node scripts/demo-founder-acceptance-v0b3.mjs` ·
   `node scripts/demo-work-continuity-v0b4.mjs` · `node scripts/demo-worker-harness-v0.mjs`
-- 还没有 UI、没有 Canvas；协调由确定性的 Continuation Driver 完成（不是 scheduler /
-  event bus / 持久队列）；执行由 WorkerHost + `codex-exec` backend 完成（另有确定性的
-  test backend 用于测试），Hiring / Genesis 未开始。
+- UI：Experience v0 只是 Founder Workspace / Employee Lobby 的只读投影后端，生产 UI 与
+  Canvas 尚未开始；Pixel Lobby（PR #1）尚未合并、尚未接入 Experience API；Laya / Jev、
+  General A2A 未开始，Hiring / Genesis 未开始。协调由确定性的 Continuation Driver 完成
+  （不是 scheduler / event bus / 持久队列）；执行由 WorkerHost + `codex-exec` backend
+  完成（另有确定性的 test backend 用于测试）。
 
 Three MVPs: **still not complete.** Company Genesis、AI Workforce Loop、AI Hiring Loop
 都还没有实现——Kernel 只是它们共同的 Runtime 地基。真实模型执行已经接通
@@ -230,6 +246,8 @@ docs/contracts/   Persistent Work Kernel v0A 契约
                      Reviewer 交付 seam、角色化 ResultContract 与有界自动重试）
                    / CodexExecAdapter v1 契约（真实 codex exec 子进程、worktree workspace、
                      prompt 编译、结果解析与独立 Harness 证据）
+                   / Workforce Experience v0 契约（Runtime-backed read projections：Founder
+                     Workspace / Employee Lobby 的派生只读产品模型与 GET 端点）
 docs/migration/   旧仓库能力迁移清单与 provenance
 packages/         company（公司根对象）/ work（Work、Task、生命周期、协作、outcome 与
                   Continuation Policy 投影）/ decision（Founder Decision 记录）/
@@ -238,8 +256,10 @@ packages/         company（公司根对象）/ work（Work、Task、生命周�
                   harness（WorkerAdapter 契约、WorkerHost、角色化 ResultContract、
                   执行绑定与 workspace 布局、确定性 test backend、真实
                   CodexExecAdapter 与 prompt/结果解析）/
-                  runtime（命令、存储、schema 迁移、Continuation Driver）
-apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam + Founder Attention 读取）
+                  runtime（命令、存储、schema 迁移、Continuation Driver）/
+                  experience（Workforce Experience v0：从 Runtime truth 派生的只读产品投影）
+apps/runtime/     Kernel 的最小运行时进程（health/status + 命令 seam + Founder Attention 与
+                  Workforce Experience 只读投影端点）
 fixtures/         种子数据（system workforce roster），不属于核心语言
 scripts/          check、重启演示、进程 harness 与 H1 真实执行场景
 tests/            smoke / 单元 / 集成测试（node --test）
