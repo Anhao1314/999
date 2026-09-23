@@ -84,7 +84,7 @@ test("the runtime process executes a Work, reviews it and waits for the Founder"
     assert.equal(reviewDetail.review.reviewerWorkerRunId, reviewDetail.runs[0].id);
 
     const status = await runtime.json("/status");
-    assert.equal(status.schemaVersion, 6);
+    assert.equal(status.schemaVersion, 7);
     assert.equal(status.counts.reviews, 1);
     assert.equal(status.counts.founderDecisions, 0);
     assert.equal(status.counts.workerExecutionBindings >= 2, true, "both attempts were bound");
@@ -117,7 +117,7 @@ test("the runtime process executes a Work, reviews it and waits for the Founder"
       "the Host found no orphaned attempt to reconcile",
     );
     const after = await runtime.json("/status");
-    assert.equal(after.schemaVersion, 6);
+    assert.equal(after.schemaVersion, 7);
     assert.equal(after.counts.reviews, 1, "the Review and its receipt survive the restart");
     assert.equal(after.counts.founderDecisions, 1);
     assert.equal(after.counts.workerExecutionBindings >= 2, true);

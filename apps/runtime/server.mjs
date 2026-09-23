@@ -44,7 +44,8 @@
 //         GET /experience/employees/:id, GET /experience/works/:id/lineage
 //           (Workforce Experience v0A: derived, bounded, GET-only product
 //            projections — see docs/contracts/workforce-experience-v0.md),
-//         POST /commands { command, input }.
+//         GET /product/execution-context, POST /product/commands,
+//         POST /commands { command, input } (legacy Kernel transport).
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
@@ -58,6 +59,12 @@ import {
   validateCodexExecutablePath,
 } from "../../packages/harness/index.mjs";
 import { createTestWorkerAdapter } from "../../packages/harness/adapters/test-worker.mjs";
+import {
+  assertBoundFounderWorks,
+  createFounderBoundResolver,
+  createFounderWorkCommand,
+  resolveLocalExecutionContext,
+} from "../../packages/product/founder-work.mjs";
 import {
   projectEmployeeDetail,
   projectFounderWorkspace,
@@ -123,6 +130,30 @@ const COMMANDS = Object.freeze({
 });
 
 const kernel = openKernel({ dir: DIR });
+const productRepository = WORKER_BACKEND === "codex-exec"
+  ? process.env.FLOWCREDIT_CODEX_REPO
+  : process.env.FLOWCREDIT_PRODUCT_REPO;
+const productRevision = WORKER_BACKEND === "codex-exec"
+  ? process.env.FLOWCREDIT_CODEX_BASE_REVISION ?? "HEAD"
+  : process.env.FLOWCREDIT_PRODUCT_BASE_REVISION ?? "HEAD";
+const productContext = productRepository
+  ? resolveLocalExecutionContext({ repository: productRepository, revision: productRevision })
+  : null;
+// A read-only/default Runtime can open the store. An executing Runtime must
+// prove every Founder Work it might drive still targets this exact project.
+if (COORDINATION === "driver") {
+  if (WORKER_BACKEND === "off" && kernel.founderWorkExecutionBindings().length > 0)
+    throw new Error("PRODUCT_BACKEND_UNAVAILABLE: Founder Work cannot be driven without a Worker backend");
+  if (WORKER_BACKEND !== "off") assertBoundFounderWorks({ kernel, context: productContext });
+}
+const createFounderWork = createFounderWorkCommand({
+  kernel, context: productContext,
+  resolveContext: () => resolveLocalExecutionContext({
+    repository: productContext.repository,
+    revision: productRevision,
+  }),
+  coordination: COORDINATION, workerBackend: WORKER_BACKEND,
+});
 const employeeRoutes = createEmployeeRoutes({ enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
 // Both product shells are static file servers inside this process: the Lobby
 // at /employees and the Founder Workspace at /workspace. Neither receives the
@@ -160,7 +191,7 @@ function resolveCodexCommand() {
 }
 
 async function buildCodexExecWorkerHost() {
-  const baseRepository = process.env.FLOWCREDIT_CODEX_REPO;
+  const baseRepository = productContext?.repository;
   if (!baseRepository) {
     process.stderr.write("FLOWCREDIT_WORKER_BACKEND=codex-exec requires FLOWCREDIT_CODEX_REPO\n");
     process.exit(1);
@@ -195,11 +226,11 @@ async function buildCodexExecWorkerHost() {
   return createWorkerHost({
     kernel,
     adapter,
-    resolver: createStaticWorkerBackendResolver({
+    resolver: createFounderBoundResolver({ kernel, context: productContext, resolver: createStaticWorkerBackendResolver({
       backendType: "codex-exec",
       backendVersion,
       baseRevision: process.env.FLOWCREDIT_CODEX_BASE_REVISION ?? "HEAD",
-    }),
+    }) }),
     runtimeRoot: DIR,
     // A real model-backed attempt takes longer than the deterministic test
     // backend. The operator can always narrow or widen this explicitly.
@@ -215,7 +246,7 @@ const workerHost =
     ? createWorkerHost({
         kernel,
         adapter: createTestWorkerAdapter(),
-        resolver: createStaticWorkerBackendResolver(),
+        resolver: createFounderBoundResolver({ kernel, context: productContext, resolver: createStaticWorkerBackendResolver() }),
         runtimeRoot: DIR,
         timeoutMs: Number(process.env.FLOWCREDIT_WORKER_TIMEOUT_MS ?? 30_000),
       })
@@ -255,25 +286,27 @@ function sendError(response, error) {
   });
 }
 
-function readBody(request) {
+function readBody(request, limit = BODY_LIMIT) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let exceeded = false;
     const chunks = [];
     request.on("data", (chunk) => {
+      if (exceeded) return;
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > limit) {
+        exceeded = true;
         reject(
           Object.assign(new Error("request body too large"), {
             code: "INVALID_REQUEST",
             status: 413,
           }),
         );
-        request.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("end", () => { if (!exceeded) resolve(Buffer.concat(chunks).toString("utf8")); });
     request.on("error", reject);
   });
 }
@@ -300,6 +333,38 @@ async function handle(request, response) {
 
   if (request.method === "GET" && url.pathname === "/status")
     return send(response, 200, kernel.status());
+
+  if (request.method === "GET" && url.pathname === "/product/execution-context") {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
+    return send(response, 200, {
+      available: COORDINATION === "driver" && WORKER_BACKEND !== "off" && Boolean(productContext),
+      contextId: productContext?.contextId ?? null,
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/product/commands") {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
+    if (!/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] ?? ""))
+      return send(response, 415, { error: { code: "INVALID_REQUEST", message: "application/json is required" } });
+    let payload;
+    try {
+      payload = JSON.parse((await readBody(request, 16 * 1024)) || "{}");
+    } catch (error) {
+      return send(response, error?.status === 413 ? 413 : 400, { error: { code: "INVALID_REQUEST", message: "body must be bounded JSON" } });
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+        Object.keys(payload).some((key) => !["command", "input"].includes(key)))
+      return send(response, 400, { error: { code: "INVALID_REQUEST", message: "invalid product command envelope" } });
+    if (payload.command !== "CreateFounderWork")
+      return send(response, 404, { error: { code: "PRODUCT_COMMAND_NOT_FOUND", message: "unknown product command" } });
+    try {
+      return send(response, 200, { result: createFounderWork(payload.input) });
+    } catch (error) {
+      return sendError(response, error);
+    }
+  }
 
   if (request.method === "GET" && url.pathname === "/companies")
     return send(response, 200, { companies: kernel.companies() });
@@ -412,6 +477,8 @@ async function handle(request, response) {
       });
     }
     const handler = COMMANDS[payload?.command];
+    if (request.headers.origin && payload?.command !== "setEmployeeEnabled")
+      return send(response, 403, { error: { code: "PRODUCT_COMMAND_REQUIRED", message: "browser writes must use the product command API" } });
     if (!handler)
       return send(response, 404, {
         error: {

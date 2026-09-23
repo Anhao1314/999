@@ -33,6 +33,7 @@ import {
   newActivityEvent,
   newArtifact,
   newCheckpoint,
+  digestOf,
 } from "../work/records.mjs";
 import { kernelError } from "./errors.mjs";
 import {
@@ -409,6 +410,48 @@ export class WorkKernel {
       });
     });
     return work;
+  }
+
+  // Product creation is one Kernel transaction: the Driver cannot observe an
+  // unbound Work between creation and its local execution context commitment.
+  createFounderWork({ requestId, companyId, title, intent, contextId, baseRevision } = {}) {
+    const request = assertRecordId(requestId, "requestId");
+    const company = assertId(companyId, "companyId");
+    const workTitle = assertText(title, "title", BOUNDS.workTitleMax);
+    const workIntent = assertText(intent, "intent", BOUNDS.workIntentMax);
+    if (typeof contextId !== "string" || !/^local-repo:sha256:[a-f0-9]{64}$/.test(contextId))
+      throw kernelError("INVALID_INPUT", "contextId must be a local repository fingerprint");
+    if (typeof baseRevision !== "string" || !/^[a-f0-9]{40,64}$/.test(baseRevision))
+      throw kernelError("INVALID_INPUT", "baseRevision must be a resolved commit");
+    const inputDigest = digestOf(JSON.stringify([company, workTitle, workIntent, contextId]));
+    const existing = this.store.founderWorkExecutionBindingByRequest(request);
+    if (existing) {
+      if (existing.inputDigest !== inputDigest)
+        throw kernelError("FOUNDER_WORK_REQUEST_CONFLICT", "requestId was used for different Work intent or context");
+      return { work: this.store.getWork(existing.workId), binding: existing, replayed: true };
+    }
+    let result;
+    this.#mutate(() => {
+      const work = this.createWork({ companyId: company, title: workTitle, intent: workIntent });
+      const binding = this.store.insertFounderWorkExecutionBinding({
+        workId: work.id,
+        requestId: request,
+        inputDigest,
+        contextId,
+        baseRevision,
+        createdAt: this.now(),
+      });
+      result = { work, binding, replayed: false };
+    });
+    return result;
+  }
+
+  founderWorkExecutionBinding(workId) {
+    return this.store.founderWorkExecutionBinding(workId);
+  }
+
+  founderWorkExecutionBindings() {
+    return this.store.listFounderWorkExecutionBindings();
   }
 
   createTask({ workId, title, intent, requiredCapabilities } = {}) {

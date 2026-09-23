@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -327,6 +327,36 @@ CREATE TRIGGER IF NOT EXISTS worker_execution_bindings_no_delete BEFORE DELETE O
   BEGIN SELECT RAISE(ABORT,'WORKER_EXECUTION_BINDING_IMMUTABLE'); END;
 `;
 
+// Local execution provenance for Founder-created Work. A digest identifies the
+// operator-selected repository without persisting its machine-specific path.
+const V7_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS founder_work_execution_bindings(
+  work_id TEXT PRIMARY KEY REFERENCES works(id),
+  request_id TEXT NOT NULL UNIQUE,
+  input_digest TEXT NOT NULL,
+  context_id TEXT NOT NULL,
+  base_revision TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS founder_work_execution_bindings_context
+  ON founder_work_execution_bindings(context_id);
+`;
+const V7_TRIGGERS_SQL = `
+CREATE TRIGGER IF NOT EXISTS founder_work_execution_bindings_no_update BEFORE UPDATE ON founder_work_execution_bindings
+  BEGIN SELECT RAISE(ABORT,'FOUNDER_WORK_EXECUTION_BINDING_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS founder_work_execution_bindings_no_delete BEFORE DELETE ON founder_work_execution_bindings
+  BEGIN SELECT RAISE(ABORT,'FOUNDER_WORK_EXECUTION_BINDING_IMMUTABLE'); END;
+`;
+
+const rowToFounderWorkExecutionBinding = (row) => row && ({
+  workId: row.work_id,
+  requestId: row.request_id,
+  inputDigest: row.input_digest,
+  contextId: row.context_id,
+  baseRevision: row.base_revision,
+  createdAt: row.created_at,
+});
+
 const rowToWorkerExecutionBinding = (row) =>
   row && {
     id: row.id,
@@ -582,6 +612,8 @@ export class KernelStore {
       this.transaction(() => this.#migrateV4ToV5());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 5)
       this.transaction(() => this.#migrateV5ToV6());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 6)
+      this.transaction(() => this.#migrateV6ToV7());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
     throw kernelError(
@@ -657,6 +689,11 @@ export class KernelStore {
     this.db.prepare("UPDATE schema_meta SET version=?").run(6);
   }
 
+  #migrateV6ToV7() {
+    this.db.exec(V7_TABLES_SQL + V7_TRIGGERS_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(7);
+  }
+
   get schemaVersion() {
     return SCHEMA_VERSION;
   }
@@ -719,6 +756,30 @@ export class KernelStore {
       .prepare("SELECT * FROM works WHERE company_id=? ORDER BY created_at, id")
       .all(companyId)
       .map(rowToWork);
+  }
+
+  insertFounderWorkExecutionBinding(binding) {
+    this.db.prepare(
+      "INSERT INTO founder_work_execution_bindings(work_id,request_id,input_digest,context_id,base_revision,created_at) VALUES(?,?,?,?,?,?)",
+    ).run(binding.workId, binding.requestId, binding.inputDigest, binding.contextId, binding.baseRevision, binding.createdAt);
+    return binding;
+  }
+
+  founderWorkExecutionBinding(workId) {
+    return rowToFounderWorkExecutionBinding(
+      this.db.prepare("SELECT * FROM founder_work_execution_bindings WHERE work_id=?").get(workId),
+    );
+  }
+
+  founderWorkExecutionBindingByRequest(requestId) {
+    return rowToFounderWorkExecutionBinding(
+      this.db.prepare("SELECT * FROM founder_work_execution_bindings WHERE request_id=?").get(requestId),
+    );
+  }
+
+  listFounderWorkExecutionBindings() {
+    return this.db.prepare("SELECT * FROM founder_work_execution_bindings ORDER BY created_at,work_id")
+      .all().map(rowToFounderWorkExecutionBinding);
   }
 
   // --- tasks ----------------------------------------------------------------

@@ -50,7 +50,7 @@ test("a work survives a hard process restart, is recovered honestly, and can be 
       "the restarted process reports what it recovered",
     );
     const status = await runtime.json("/status");
-    assert.equal(status.schemaVersion, 6, "a fresh v0A store migrates to schema v6");
+    assert.equal(status.schemaVersion, 7, "a fresh v0A store migrates to schema v7");
     assert.equal(status.recovery.count, 1);
     assert.equal(status.tasksByState.INTERRUPTED, 1);
 
@@ -641,7 +641,7 @@ test("a Founder Decision survives a hard restart and is never re-adjudicated", a
     runtime = await startRuntime({ dir });
     assert.match(runtime.output(), /FlowCredit runtime ready/);
     const status = await runtime.json("/status");
-    assert.equal(status.schemaVersion, 6);
+    assert.equal(status.schemaVersion, 7);
     assert.equal(status.counts.founderDecisions, 1);
     assert.equal(
       status.recovery.count,

@@ -55,8 +55,13 @@ v0B4 把"调度团队"这一段也交还给 Runtime：Continuation Driver 是一
 fail-closed 强制；`WORK_ALREADY_ACTIVATED` 是良性收敛而不是失败。跨 Work 的唤醒只是
 "公司人力事实变了（run 结束 / enabled 变化 / 新员工）→ 重新读真相"的信号：不写别的
 Work 的 Activity、不推进它的 basis、没有持久队列、没有 event bus。新增 append-only 的
-`continuation_traces`（仅供观测，永不作为决策输入）；store 已是 schema v6，v1–v5 旧
+`continuation_traces`（仅供观测，永不作为决策输入）；v0B4 时 store 为 schema v6，v1–v5 旧
 store 会逐级迁移（v1 → v2 → v3 → v4 → v5 → v6）且不做任何历史回填。
+
+Backend Founder Work Loop v0A 增加独立的 `CreateFounderWork` 产品命令和不可变的
+Work 级本地执行绑定（仓库指纹 + 固定 commit，不存绝对路径）；当前 store 为 schema v7。
+默认 Runtime 仍不开启协调或 Worker backend。契约见
+[`docs/contracts/backend-founder-work-loop-v0a.md`](docs/contracts/backend-founder-work-loop-v0a.md)。
 
 H0/H0.1/H0.2 是**实验证据**：用真实 `codex exec` 子进程验证执行层假设——真实 Codex
 执行从实验上确认了 Harness 的隔离边界、中断与结构化结果假设，这些结论随后被固化成执行
