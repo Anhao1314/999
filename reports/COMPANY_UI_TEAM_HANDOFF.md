@@ -4,7 +4,7 @@
 
 用户要求先不改后端，按提供的浅蓝雪山玻璃风格图完成 UI 初版，并上传仓库供队友对接。
 
-协作分支：`feat/company-canvas-ui-v0`。基于同步时的主线 `f8b484b`，新增独立演示模块 `apps/company/`；不会覆盖已经合并的 `apps/workspace/`、`apps/employee/`、Desktop、Runtime 或 Experience。
+协作分支：`feat/company-canvas-ui-v0`，PR #6。基于同步时的主线 `f8b484b`，新增独立演示模块 `apps/company/`；本次追加招聘 UI，并对既有 `apps/employee/` 做岗位筛选、列表切换、演示招聘档案展示的增量修改。Workspace、Desktop、Runtime 和 Experience 未修改。
 
 主线已包含 Worker Harness、CodexExecAdapter、Employee Lobby 与 Founder Workspace。此前旧员工分支中“没有模型执行”的评估不代表当前 main；本 PR 的“未连接执行环境”等文案仅指这个演示页面。
 
@@ -57,6 +57,16 @@ npm run start:company
 - 完整回归由仓库 `FlowCredit CI` 执行，结果不能由旧分支测试代替。
 - 图像生成来源、具体提示词、截图和限制见 [UI 验收记录](COMPANY_UI_V0.md)。
 
-## 本轮没有包含
+## 招聘与圆桌对接（追加）
 
-原本地员工列表／岗位筛选的未提交改动不在本 PR 中，避免覆盖队友已经重构的员工大厅。未合并 main，未修改后端，未声明真实执行或审批已经由本 UI 接通。
+按 Hiring UI 设计规范实现 Overview、六步 Wizard、岗位模板、权限范围、模拟试用、Founder Confirm 与欢迎页。详见 [招聘与圆桌验收记录](COMPANY_HIRING_UI.md)。
+
+- 公司侧栏「AI 员工」、AI Workforce、员工完整档案均进入原有圆桌大厅，不再展示替代的员工方格页。
+- 静态预览在同一 origin 提供 `/employees?demo=1&companyPreview=1`。仅此预览替换 demo adapter 并注入往返导航；生产 Employee server、HTTP adapter 和 LIVE 读取路径不变。
+- `hiring-store.mjs` 仅保存带 demo/prototype 来源标识的草稿与确认记录。试用 PASS 不入职，Founder 确认才加入演示名单；修改配置使试用证据失效。试用永不调用 WorkerRun。
+- `lobby-adapter.mjs` 将原有大厅的合成数据替换为公司画布同一团队，映射新员工的身份、头像、能力与招聘摘要。新员工入座复用原来的动画与 seating。
+- 岗位筛选、状态筛选、姓名搜索、卡片/列表切换作用于当前投影，同样兼容 LIVE 模式。原工作区未提交的旧版员工文件未被覆盖。
+- 大厅内原有模拟工作、头像与配置编辑仍是本页体验，刷新恢复；仅招聘确认记录跨页保存。浏览器禁用存储时明确降为本页状态，不承诺跨页入职。
+- 后续真实接入应通过 Hiring Product Command API → Application Layer → Runtime；不要将 localStorage 内容直接导入 Runtime，也不要从浏览器新增底层 `/commands` 调用。
+
+新增验收：`npm run test:company` 8/8；`npm run test:employees` 16/16。浏览器走通失败重试、显式确认、8→9 人、入座、岗位筛选与工牌摘要；检查 1440×900 / 390×844，控制台无 error/warn。PR 更新后以对应提交的 CI 为准。未合并 main。

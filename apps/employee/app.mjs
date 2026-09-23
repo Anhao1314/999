@@ -118,6 +118,8 @@ async function loadDetail(id) {
 async function navigate(next) { if (!await discard()) return; dirty = false; page = next; renderCard(); $('card-body').scrollTop = 0; }
 $('open-roster').onclick = () => { renderRoster(); openDialog('roster'); };
 $('search').oninput = renderRoster; $('filter').onchange = renderRoster;
+$('role-filter').onchange = renderRoster;
+document.querySelectorAll('[data-roster-view]').forEach(b => b.onclick = () => { const view=b.dataset.rosterView; $('grid').classList.toggle('fc-grid-list', view==='list'); document.querySelectorAll('[data-roster-view]').forEach(el => el.setAttribute('aria-pressed', String(el===b))); });
 $('reduce-motion').checked = reduceQuery.matches;
 function reduceMotion() { document.body.classList.toggle('fc-reduced', reduced()); if (reduced()) for (const a of animations) a.finish(); }
 $('reduce-motion').onchange = reduceMotion; reduceQuery.addEventListener('change', reduceMotion); reduceMotion();
@@ -130,7 +132,10 @@ function rosterMatch(e) {
   return e.availability === filter;
 }
 function renderRoster() {
-  const search = $('search').value.trim().toLowerCase(), list = activeEmployees().filter(e => `${e.displayName} ${e.position?.title ?? ''}`.toLowerCase().includes(search) && rosterMatch(e));
+  const roles=[...new Set(activeEmployees().map(e=>e.position?.title??'未设置岗位'))].sort(), previous=$('role-filter').value;
+  $('role-filter').replaceChildren(new Option('全部岗位',''),...roles.map(role=>new Option(role,role)));$('role-filter').value=roles.includes(previous)?previous:'';
+  const search = $('search').value.trim().toLowerCase(), list = activeEmployees().filter(e => `${e.displayName} ${e.position?.title ?? ''}`.toLowerCase().includes(search) && rosterMatch(e) && (!$('role-filter').value||($('role-filter').value===(e.position?.title??'未设置岗位'))));
+  $('roster-result-count').textContent=`${list.length} / ${activeEmployees().length} 位员工`;
   const signature = JSON.stringify(list.map(e => [e.employeeId, e.displayName, e.position?.title, e.availability, e.condition, portrait(e)]));
   if ($('grid').dataset.signature === signature) return;
   $('grid').dataset.signature = signature;
@@ -251,7 +256,10 @@ function overview(e) {
     right.append(usage);
   }
   const skills = block('岗位能力'), tags = node('div', undefined, 'fc-tags'); for (const s of e.capabilities ?? []) tags.append(node('span', s)); if (!tags.children.length) tags.append(node('span', '未提供')); skills.append(tags); right.append(skills);
-  const tools = block('工具 / 权限'); tools.append(node('p', '未接入工具与授权目录')); right.append(tools); wrap.append(left, right); return wrap;
+  const tools = block('工具 / 权限');
+  if(demo && e.demo?.hiring){const h=e.demo.hiring;tools.append(node('p','招聘确认配置 · 仅为 Demo，不授予真实权限'),node('p',`Knowledge: ${h.knowledge.join(' · ')||'无'}（Read）`),node('p',`Tools: ${h.tools.join(' · ')||'无'}`),node('p',`Permissions: ${h.permissions.join(' · ')||'无'}`),node('p','Commit 需要策略 · 禁止外部发布与财务操作'));const hiring=block('招聘档案 · Demo');hiring.append(node('p',h.mission),node('p',`${h.communication} · ${h.workingStyle}`),node('p',`Skills: ${h.skills.join(' · ')||'无'}`),node('p','模拟试用 PASS · Founder 已确认 · 能力仍为 Declared'));right.append(hiring);}
+  else tools.append(node('p', '未接入工具与授权目录'));
+  right.append(tools); wrap.append(left, right); return wrap;
 }
 function isWorkingWorker(e) { return e.availability === AVAILABILITY.WORKING; }
 function renderCard() {
