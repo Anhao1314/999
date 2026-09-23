@@ -8,6 +8,8 @@
     "node": ">=24.19.0 <25"
   },
   "scripts": {
+    "start:company": "node scripts/preview-company.mjs",
+    "test:company": "node --test tests/unit/company-hiring.test.mjs tests/integration/company-preview.test.mjs",
     "start:employees": "node scripts/start-employee-ui.mjs",
     "start:desktop": "npm --prefix apps/desktop start",
     "start:workspace": "node scripts/start-workspace-ui.mjs",

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#e5eefb">
+  <title>FlowCredit · 公司工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%232a83ff'/%3E%3Ctext x='12' y='29' fill='white' font-size='28' font-family='Arial'%3EF%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./hiring.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <div class="wallpaper" aria-hidden="true"></div>
+  <aside class="sidebar" aria-label="主导航">
+    <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+    <nav>
+      <button class="nav-item active" data-nav="company" aria-label="公司 Company" aria-current="page"><span data-icon="home"></span><span>公司<small>Company</small></span></button>
+      <button class="nav-item" data-nav="work" aria-label="工作 Work"><span data-icon="work"></span><span>工作<small>Work</small></span></button>
+      <button class="nav-item" data-nav="employees" aria-label="AI 员工 Employees"><span data-icon="user"></span><span>AI 员工<small>Employees</small></span></button>
+      <button class="nav-item" data-nav="hiring" aria-label="招聘 Hiring"><span data-icon="plus-circle"></span><span>招聘<small>Hiring</small></span></button>
+      <button class="nav-item" data-nav="artifacts" aria-label="交付物 Artifacts"><span data-icon="file"></span><span>交付物<small>Artifacts</small></span></button>
+      <button class="nav-item" data-nav="knowledge" aria-label="知识 Knowledge"><span data-icon="book"></span><span>知识<small>Knowledge</small></span></button>
+    </nav>
+    <div class="sidebar-bottom"><button class="nav-item" data-action="settings" aria-label="设置 Settings"><span data-icon="settings"></span><span>设置<small>Settings</small></span></button>
+      <div class="brand-note"><span data-icon="moon"></span><p>A company<br>of AI employees,<br>for a more capable you.</p><span>— FlowCredit</span></div>
+    </div>
+  </aside>
+  <header class="topbar">
+    <a class="brand" href="#company" aria-label="FlowCredit 公司首页"><span class="brand-mark">F</span><strong>FlowCredit</strong><span class="brand-subtitle">Company OS</span></a>
+    <button class="workspace-switch" data-action="workspace"><span data-icon="building"></span><strong>FlowCredit Studio</strong><span data-icon="chevron-down"></span></button>
+    <div class="top-actions"><button class="soft-button new-work" data-action="new-work" aria-label="新建 Work"><span data-icon="plus"></span><span>新建 Work</span></button><button class="soft-button search-button" data-action="search" aria-label="搜索工作与员工"><span data-icon="search"></span><span>⌘ K</span></button><button class="demo-badge" data-action="demo-info"><i class="status-dot"></i><span>演示空间</span><span data-icon="chevron-down"></span></button><button class="founder-avatar" data-action="profile" aria-label="Founder 个人信息">Y</button></div>
+  </header>
+  <main class="workspace">
+    <section class="welcome"><div><p class="eyebrow">YOUR COMPANY, IN FLOW</p><h1 id="page-title">Good morning, Founder.</h1><p id="page-description">你的 AI 公司，一切从这里开始。</p><div class="company-status"><span><i class="status-dot"></i>公司运行中</span><i></i><span>8 名员工</span><i></i><span id="work-count">4 个进行中工作</span><i></i><button data-action="attention">2 个需要你处理 <span data-icon="chevron-right"></span></button></div></div><div class="clock"><span id="date"></span><strong id="time"></strong><p>更好的想法<br>由更强的团队实现。</p><span class="clock-line"></span></div></section>
+    <section class="canvas-view" id="canvas-view" aria-label="公司工作画布">
+      <div class="canvas-stage" id="canvas-stage">
+        <svg class="connections" viewBox="0 0 1000 650" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="wire"><stop stop-color="#fff"/><stop offset=".55" stop-color="#a1c7ff"/><stop offset="1" stop-color="#fff"/></linearGradient></defs><path d="M205 130 C240 130 200 245 382 245"/><path d="M610 210 C715 210 670 55 814 65"/><path d="M440 352 C425 413 214 364 219 475"/><path d="M685 355 C753 386 803 402 820 454"/><circle cx="331" cy="240" r="4"/><circle cx="716" cy="121" r="4"/><circle cx="331" cy="399" r="4"/></svg>
+        <article class="glass-card workforce-card" data-widget="team"><button class="card-heading" data-nav="employees"><span class="color-icon blue" data-icon="users"></span><span><strong>AI Workforce</strong><small>8 名员工 · 3 工作中</small></span><span data-icon="chevron-right"></span></button><div class="team-avatars" id="team-avatars"></div></article>
+        <button class="glass-card attention-card" data-action="attention" data-widget="attention"><span class="notification-icon"><b>2</b></span><span><strong>需要你处理</strong><small>2 个待决策事项</small></span><span data-icon="chevron-right"></span></button>
+        <article class="glass-card work-card" data-widget="work"><div class="work-card-heading"><span class="brand-mark large">F</span><div><button class="work-title" data-action="work-detail">OAuth Refresh Bug</button><div class="work-meta"><span>#102</span><span class="priority">高优先级</span></div></div><span class="running"><i class="status-dot blue-dot"></i>执行中</span><button class="icon-button" data-action="work-detail" aria-label="工作详情与更多操作"><span data-icon="more"></span></button></div><p class="work-description">修复登录状态刷新失效的问题，并完善单元测试。</p><div class="workflow"><button class="flow-step" data-employee="alice"><span class="avatar step-avatar"><img src="../employee/assets/portrait-3.png" alt="Alice"></span><strong>Alice</strong><small>执行中</small></button><span class="flow-arrow">→</span><button class="flow-step" data-action="artifact"><span class="flow-icon" data-icon="file"></span><strong>Artifact v1</strong><small>已生成</small></button><span class="flow-arrow">→</span><button class="flow-step" data-employee="iris"><span class="avatar step-avatar lavender"><img src="../employee/assets/portrait-2.png" alt="Iris"></span><strong>Iris</strong><small>Review 中</small></button><span class="flow-arrow">→</span><button class="flow-step" data-action="attention"><span class="waiting-icon"><i></i></span><strong>等待</strong><small>你的决策</small></button></div><div class="work-card-footer"><span><span data-icon="clipboard"></span>3 个文件变更</span><span class="test-result"><span data-icon="check"></span>9/9 测试通过</span><span class="updated"><span data-icon="clock"></span>2 小时前更新</span><button class="round-arrow" data-action="work-detail" aria-label="打开 OAuth Refresh Bug"><span data-icon="arrow-right"></span></button></div></article>
+        <p class="handwritten left-note" aria-hidden="true">People<br>&nbsp; Work<br>&nbsp;&nbsp; Knowledge<br><span>A Better You</span></p><p class="handwritten right-note" aria-hidden="true">Same Ideas.<br>More Impact.</p>
+        <article class="glass-card deliveries-card" data-widget="deliveries"><button class="card-heading" data-nav="artifacts"><span class="color-icon purple" data-icon="cube"></span><strong>Recent Deliveries</strong><span data-icon="chevron-right"></span></button><div id="recent-deliveries"></div></article>
+        <button class="add-canvas" data-action="widgets"><span class="add-circle" data-icon="plus"></span><strong>添加到画布</strong><small>工作 · 员工 · 交付物 · 指标</small></button>
+        <article class="glass-card pulse-card" data-widget="pulse"><button class="card-heading" data-action="pulse"><span class="color-icon blue" data-icon="chart"></span><span><strong>Company Pulse</strong><small>今日概览</small></span><span data-icon="chevron-right"></span></button><div class="metrics"><div><strong id="metric-new">6</strong><small>新建工作</small><span class="positive">+2</span></div><div><strong>3</strong><small>完成交付</small><span class="positive">+1</span></div><div><strong>2</strong><small>等待 Review</small><span class="negative">−1</span></div><div><strong>2</strong><small>需要你处理</small><span>+0</span></div></div></article>
+      </div>
+      <div class="canvas-toolbar" aria-label="画布工具"><button class="selected" data-action="canvas-layout" aria-label="自由画布" aria-pressed="true"><span data-icon="cursor"></span></button><button data-action="grid-layout" aria-label="网格布局" aria-pressed="false"><span data-icon="grid"></span></button><button data-action="canvas-map" aria-label="画布导航"><span data-icon="map"></span></button><button data-action="toggle-inspector" aria-label="显示或隐藏详情" aria-pressed="true"><span data-icon="panel"></span></button><i></i><div class="zoom-control"><button data-action="zoom-out" aria-label="缩小画布"><span data-icon="minus"></span></button><button id="zoom-value" data-action="zoom-reset" aria-label="重置画布缩放">100%</button><button data-action="zoom-in" aria-label="放大画布"><span data-icon="plus"></span></button></div></div>
+      <span class="prototype-caption">UI PREVIEW <i></i> 示例数据 · 不执行真实任务</span>
+    </section>
+    <section id="section-view" class="section-view" hidden aria-label="工作空间内容"></section>
+  </main>
+  <aside class="inspector" id="inspector" aria-label="员工详情"><div class="inspector-tabs" role="tablist" aria-label="员工信息"><button role="tab" id="details-tab" aria-selected="true" aria-controls="inspector-content" data-tab="details">详情</button><button role="tab" id="activity-tab" aria-selected="false" aria-controls="inspector-content" data-tab="activity">活动</button><button class="inspector-close icon-button" data-action="toggle-inspector" aria-label="关闭员工详情"><span data-icon="close"></span></button></div><div id="inspector-content" role="tabpanel" aria-labelledby="details-tab"></div></aside>
+  <dialog id="modal" aria-labelledby="modal-title"><header class="modal-header"><div><span class="eyebrow">FLOWCREDIT STUDIO</span><h2 id="modal-title"></h2></div><button class="icon-button" data-action="close-modal" aria-label="关闭弹窗"><span data-icon="close"></span></button></header><div id="modal-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
