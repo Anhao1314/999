@@ -1,0 +1,62 @@
+.fc-hiring{padding:30px 34px 24px;color:var(--ui-ink,#202936);font:13px/1.6 var(--ui-font);min-width:0}
+.fc-hiring *{box-sizing:border-box}
+.fc-hiring-kicker{display:block;color:#576b80;font-size:10px;font-weight:700;letter-spacing:.12em}
+.fc-hiring-hero{margin:0 0 30px}
+.fc-hiring-hero h3{max-width:720px;margin:9px 0 10px;font-size:28px;line-height:1.34;letter-spacing:-.035em;font-weight:650}
+.fc-hiring-muted{margin:6px 0;color:#56616e;font-size:12px;line-height:1.65}
+.fc-hiring-hero>.fc-hiring-muted{font-size:13px}
+.fc-hiring-connection{padding:10px 14px;background:#fff1d6a8;color:#765323;border-radius:10px;margin-bottom:20px}
+.fc-hiring-activity{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(260px,.65fr);gap:34px;align-items:start;margin-bottom:34px}
+.fc-hiring-need{padding:27px 28px 26px;border:1px solid #ffffffb6;background:#ffffff82;border-radius:20px;box-shadow:0 12px 34px #263a4c0b}
+.fc-hiring-need h4{font-size:21px;line-height:1.4;margin:9px 0 20px;letter-spacing:-.025em}
+.fc-hiring-demand-title{display:block;font-size:15px}
+.fc-hiring-need>.fc-hiring-muted{max-width:50ch}
+.fc-hiring-primary{display:inline-flex;align-items:center;justify-content:center;min-height:42px;border:0;border-radius:11px;padding:9px 15px;margin-top:22px;background:#e0edff;color:#145fae;font:620 12px var(--ui-font);cursor:pointer}
+.fc-hiring-primary:hover{background:#d3e6ff}
+.fc-hiring-signals{padding-top:2px}
+.fc-hiring-state-line{padding:2px 0 16px;margin:0 0 14px;border-bottom:1px solid #58687929}
+.fc-hiring-state-line h4{font-size:11px;color:#556c83;font-weight:650;margin:0 0 7px}
+.fc-hiring-state-line strong{font-size:14px;line-height:1.5;font-weight:600}
+.fc-hiring-state-line .fc-hiring-muted{font-size:11px}
+.fc-hiring-link,.fc-hiring-back{border:0;background:none;color:#155dac;font:600 12px var(--ui-font);min-height:35px;padding:6px 0;text-align:left;cursor:pointer}
+.fc-hiring-link:hover{text-decoration:underline}
+.fc-hiring-plan{border:1px solid #c1d9f58c;background:#f5f9ffbd;border-radius:17px;padding:19px 22px;margin:-4px 0 30px;box-shadow:0 8px 25px #213a5d0b}
+.fc-hiring-plan-head{display:flex;align-items:center;justify-content:space-between}
+.fc-hiring-plan h4{font-size:18px;margin:4px 0 7px}
+.fc-hiring-plan input{display:block;width:min(100%,480px);height:45px;border:1px solid #a8bdcf8c;border-radius:10px;background:#fff;font:14px var(--ui-font);padding:0 13px;margin:17px 0 0;color:#202936}
+.fc-hiring-boundary{font-size:11px!important;color:#607081!important}
+.fc-hiring-lower{display:grid;grid-template-columns:minmax(0,1.06fr) minmax(295px,.94fr);gap:42px;align-items:start}
+.fc-hiring-inventory{min-width:0}
+.fc-hiring-inventory h4,.fc-hiring-history h4{margin:7px 0 7px;font-size:18px;letter-spacing:-.025em}
+.fc-hiring-inventory h5{font-size:11px;color:#586b7f;letter-spacing:.025em;margin:22px 0 3px}
+.fc-hiring-row{display:flex;flex-direction:column;gap:4px;width:100%;text-align:left;padding:13px 11px;background:transparent;border:0;border-bottom:1px solid #60708122;border-radius:0;cursor:pointer;color:#202936;font:inherit}
+.fc-hiring-row:hover{background:#ffffff70;border-radius:10px}
+.fc-hiring-row[data-selected="true"]{background:#e1edffcc;border-radius:10px;box-shadow:inset 0 0 0 1px #2b80dd30}
+.fc-hiring-row strong{font-size:14px;font-weight:610;line-height:1.45}
+.fc-hiring-row span{font-size:11px;color:#53616e;line-height:1.5;overflow-wrap:anywhere}
+.fc-hiring-row small{font-size:10px;color:#657689;line-height:1.5}
+.fc-hiring-guide{border-left:1px solid #60708127;padding:15px 0 10px 27px}
+.fc-hiring-guide h4{font-size:16px;line-height:1.5;margin:8px 0 21px}
+.fc-hiring-section{padding:19px 0 0;border-top:1px solid #60708122;margin:19px 0 0}
+.fc-hiring-section h4{font-size:12px;margin:0 0 8px;color:#384958}
+.fc-hiring-guide .fc-hiring-section{padding:0;border:0;margin:18px 0}
+.fc-hiring-guide .fc-hiring-section h4{font-size:12px;margin-bottom:3px}
+.fc-hiring-guide .fc-hiring-section p{font-size:11px}
+.fc-hiring-inspector{min-width:0;border:1px solid #ffffffb5;background:#ffffff85;box-shadow:0 10px 32px #263a4c08;border-radius:18px;padding:20px 22px;outline-offset:3px;overflow-wrap:anywhere}
+.fc-hiring-inspector h3{font-size:19px;line-height:1.4;margin:6px 0 10px}
+.fc-hiring-inspector .fc-hiring-section:first-of-type{margin-top:16px}
+.fc-hiring-position-name{font-size:13px;color:#53616e}
+.fc-hiring-capabilities{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0}
+.fc-hiring-capability{display:inline-block;background:#e8f0f8b2;color:#3d5d7c;border-radius:7px;padding:5px 8px;font-size:11px}
+.fc-hiring-technical{border-top:1px solid #60708122;padding-top:13px;margin-top:24px;color:#53616e;font-size:11px}
+.fc-hiring-technical summary{cursor:pointer;min-height:35px;line-height:35px}
+.fc-hiring-technical dl{display:grid;grid-template-columns:75px minmax(0,1fr);gap:8px;margin:8px 0}
+.fc-hiring-technical dd{margin:0;font:10px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.fc-hiring-history{border-top:1px solid #60708129;padding:20px 0 0;margin:35px 0 0}
+.fc-hiring-history h4{font-size:14px}
+.fc-hiring :is(button,input,summary):focus-visible{outline:2px solid #0875df;outline-offset:3px}
+.fc-page-popover:has(.fc-hiring){background:rgba(253,251,247,.87)}
+@media(min-width:901px){.fc-hiring-lower[data-detail="true"]>.fc-hiring-inspector{max-height:max(260px,calc(100dvh - 440px));overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}}
+@media(max-width:900px){.fc-hiring{padding:25px}.fc-hiring-activity{grid-template-columns:1fr;gap:20px}.fc-hiring-signals{display:grid;grid-template-columns:1fr 1fr;gap:22px}.fc-hiring-lower{grid-template-columns:1fr;gap:22px}.fc-hiring-guide{border-left:0;border-top:1px solid #60708127;padding:22px 0}.fc-hiring-lower[data-detail="true"]>.fc-hiring-inventory{display:none}.fc-hiring-lower[data-detail="true"]>.fc-hiring-inspector{background:#ffffffb3}.fc-hiring:has(.fc-hiring-lower[data-detail="true"]) :is(.fc-hiring-hero,.fc-hiring-activity,.fc-hiring-plan){display:none}.fc-hiring .fc-hiring-back{display:inline-flex;align-items:center}.fc-hiring :is(.fc-hiring-back,.fc-hiring-link){min-height:44px}}
+@media(max-width:520px){.fc-hiring{padding:20px 18px}.fc-hiring-hero h3{font-size:22px}.fc-hiring-need{padding:21px}.fc-hiring-need h4{font-size:19px}.fc-hiring-signals{display:block}.fc-hiring-inspector{padding:18px}.fc-hiring-history{margin-top:24px}}
+@media(prefers-reduced-transparency:reduce){.fc-page-popover:has(.fc-hiring){background:#fcfaf7}.fc-hiring-need,.fc-hiring-inspector{background:#f5f3f0}.fc-hiring-plan{background:#f1f6fc}}

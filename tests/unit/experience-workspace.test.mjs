@@ -25,6 +25,27 @@ import {
   seedWorkReadyForDecision,
 } from "../support/kernel.mjs";
 
+test("the Founder companion appears only for an actual assistant Employee", () => {
+  const { kernel, cleanup } = openTempKernel();
+  try {
+    const company = kernel.createCompany({ name: "Companion test" });
+    const ordinary = kernel.createPosition({ companyId: company.id, title: "Designer", capabilities: ["design.visual"] });
+    kernel.createEmployee({ companyId: company.id, positionId: ordinary.id, displayName: "Designer A" });
+    assert.equal(projectFounderWorkspace({ kernel, companyId: company.id }).founderAssistant, null);
+
+    const position = kernel.createPosition({ companyId: company.id, title: "创始人助理", capabilities: ["founder.assistant"] });
+    const employee = kernel.createEmployee({ companyId: company.id, positionId: position.id, displayName: "小流" });
+    const companion = projectFounderWorkspace({ kernel, companyId: company.id }).founderAssistant;
+    assert.equal(companion.employeeId, employee.id);
+    assert.equal(companion.displayName, "小流");
+    assert.equal(companion.position.title, "创始人助理");
+    assert.equal(companion.availability, "AVAILABLE");
+    assert.equal(companion.currentWork, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("an exhausted autonomous budget reaches the Founder as attention, not as a failed Employee", () => {
   const { kernel, cleanup } = openTempKernel();
   try {

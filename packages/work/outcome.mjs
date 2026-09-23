@@ -26,7 +26,7 @@ const byCreatedAt = (records) =>
 // Historical evidence is not current outcome reality. An Artifact left behind
 // by an abandoned or interrupted generation stays readable and immutable
 // forever, but it can never become a candidate again once its Task moves on.
-export function currentOutcomeCandidates({ tasks = [], artifacts = [] } = {}) {
+export function currentOutcomeCandidates({ tasks = [], artifacts = [], intermediateTaskIds = new Set() } = {}) {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const superseded = new Set(
     artifacts.map((artifact) => artifact.supersedesArtifactId).filter(Boolean),
@@ -34,6 +34,7 @@ export function currentOutcomeCandidates({ tasks = [], artifacts = [] } = {}) {
   return byCreatedAt(
     artifacts.filter((artifact) => {
       if (superseded.has(artifact.id)) return false;
+      if (intermediateTaskIds.has(artifact.taskId)) return false;
       const producer = taskById.get(artifact.taskId);
       return (
         Boolean(producer) &&
@@ -64,8 +65,8 @@ const acceptedView = (decision) => ({
   basis: decision.basisSequence,
 });
 
-export function deriveOutcome({ tasks = [], artifacts = [], decision = null } = {}) {
-  const candidateArtifacts = currentOutcomeCandidates({ tasks, artifacts });
+export function deriveOutcome({ tasks = [], artifacts = [], decision = null, intermediateTaskIds = new Set() } = {}) {
+  const candidateArtifacts = currentOutcomeCandidates({ tasks, artifacts, intermediateTaskIds });
   if (decision) {
     return {
       state: OUTCOME_STATES.ACCEPTED,

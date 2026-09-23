@@ -16,20 +16,58 @@ test('founder workspace: static shell, projection reads, no writes, no activity'
     const facts = await seedWorkspaceFixture((command, input) => runtime.command(command, input));
 
     // --- the static shell ---
+    const launch = await fetch(`${runtime.base}/workspace?launch=1`);
+    assert.equal(launch.status, 200);
+    const launchHtml = await launch.text();
+    assert.match(launchHtml, /FlowCredit 启动页/);
+    assert.match(launchHtml, /href="\/workspace" data-enter aria-label="进入首页"/);
+    assert.match(launchHtml, /href="\/employees" data-enter/);
+    assert.match(launch.headers.get('content-security-policy'), /media-src 'self';/);
+    for (const file of ['welcome.css', 'welcome.mjs', 'portal-geometry.mjs', 'scene-background.mjs', 'scene-background.css', 'scene-preference.mjs']) {
+      assert.equal((await fetch(`${runtime.base}/workspace-assets/${file}`)).status, 200);
+    }
     const page = await fetch(`${runtime.base}/workspace`);
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /text\/html/);
     assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
+    assert.match(page.headers.get('content-security-policy'), /frame-src 'self'/);
+    assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
-    assert.match(await page.text(), /工作台/);
+    const workspacePage = await page.text();
+    assert.match(workspacePage, /工作台/);
+    assert.match(workspacePage, /<dialog[^>]*id="page-popover"/);
+    assert.match(workspacePage, /<iframe[^>]*id="page-popover-frame"/);
+    assert.match(workspacePage, /id="board-layer"/);
+    assert.match(workspacePage, /<img src="\/workspace-assets\/flowcredit-brand\.png" alt="">/);
+    assert.match(workspacePage, /<dialog[^>]*id="board-detail"/);
     const asset = await fetch(`${runtime.base}/workspace-assets/app.mjs`);
     assert.equal(asset.status, 200);
     assert.match(asset.headers.get('content-type'), /javascript/);
+    const placement = await fetch(`${runtime.base}/workspace-assets/placement.mjs`);
+    assert.equal(placement.status, 200);
+    assert.match(placement.headers.get('content-type'), /javascript/);
+    const boardLayout = await fetch(`${runtime.base}/workspace-assets/board-layout.mjs`);
+    assert.equal(boardLayout.status, 200);
+    assert.match(boardLayout.headers.get('content-type'), /javascript/);
+    const subpages = await fetch(`${runtime.base}/workspace-assets/subpages.mjs`);
+    assert.equal(subpages.status, 200);
+    assert.match(subpages.headers.get('content-type'), /javascript/);
     const styles = await fetch(`${runtime.base}/workspace-assets/styles.css`);
     assert.equal(styles.status, 200);
     assert.match(styles.headers.get('content-type'), /text\/css/);
+    assert.match(await styles.text(), /alpine-wallpaper\.png/);
+    const wallpaper = await fetch(`${runtime.base}/workspace-assets/alpine-wallpaper.png`);
+    assert.equal(wallpaper.status, 200);
+    assert.match(wallpaper.headers.get('content-type'), /image\/png/);
+    assert.match(wallpaper.headers.get('content-security-policy'), /img-src 'self'/);
+    assert.ok((await wallpaper.arrayBuffer()).byteLength > 100_000);
+    const brandImage = await fetch(`${runtime.base}/workspace-assets/flowcredit-brand.png`);
+    assert.equal(brandImage.status, 200);
+    assert.match(brandImage.headers.get('content-type'), /image\/png/);
+    assert.ok((await brandImage.arrayBuffer()).byteLength > 100_000);
     assert.equal((await fetch(`${runtime.base}/workspace-assets/server.mjs`)).status, 404);
     assert.equal((await fetch(`${runtime.base}/workspace-assets/%2e%2e/server.mjs`)).status, 404);
+    assert.equal((await fetch(`${runtime.base}/company`)).status, 404);
 
     // --- local-origin gate and GET-only shell ---
     assert.equal((await fetch(`${runtime.base}/workspace`, { headers: { origin: 'https://evil.invalid' } })).status, 403);

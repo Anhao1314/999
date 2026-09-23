@@ -73,11 +73,20 @@ test("every redirect is revalidated, and a private target is never fetched", asy
   await assert.rejects(dnsRedirect.read({ url: "https://public.example/" }), { code: "WEB_URL_DENIED" });
 });
 
+test("a Founder-scoped reader never follows a redirect to another public host", async () => {
+  let connections = 0;
+  const reader = createWebReader({ resolveHost: publicDns, sameHostRedirectsOnly: true,
+    transport: async () => { connections += 1; return {
+      statusCode: 302, headers: { location: "https://unapproved.example/product" }, body: Buffer.alloc(0),
+    }; } });
+  await assert.rejects(reader.read({ url: "https://public.example/start" }), { code: "WEB_URL_DENIED" });
+  assert.equal(connections, 1);
+});
+
 test("redirect count, response, extracted text, headers, encoding and content type remain bounded", async (t) => {
   const cases = [
     ["redirect", async () => ({ statusCode: 302, headers: { location: "/again" }, body: Buffer.alloc(0) }), "WEB_REDIRECT_LIMIT"],
     ["response", async () => text("x".repeat(WEB_LIMITS.responseBytes + 1)), "WEB_RESPONSE_TOO_LARGE"],
-    ["extraction", async () => text("x".repeat(WEB_LIMITS.extractedTextBytes + 1)), "WEB_EXTRACTED_TEXT_TOO_LARGE"],
     ["headers", async () => ({ ...text(), headers: { "content-type": "text/plain", padding: "x".repeat(WEB_LIMITS.headerBytes) } }), "WEB_RESPONSE_TOO_LARGE"],
     ["encoding", async () => ({ ...text(), headers: { "content-type": "text/plain", "content-encoding": "gzip" } }), "WEB_ENCODING_UNSUPPORTED"],
     ["content-type", async () => ({ ...text(), headers: { "content-type": "application/pdf" } }), "WEB_CONTENT_TYPE_UNSUPPORTED"],
@@ -86,6 +95,11 @@ test("redirect count, response, extracted text, headers, encoding and content ty
     const reader = createWebReader({ resolveHost: publicDns, transport });
     await assert.rejects(reader.read({ url: "https://public.example/" }), { code });
   });
+  const clipped = createWebReader({ resolveHost: publicDns,
+    transport: async () => text("x".repeat(WEB_LIMITS.extractedTextBytes + 1)) });
+  const observation = await clipped.read({ url: "https://public.example/" });
+  assert.ok(Buffer.byteLength(observation.content) <= WEB_LIMITS.extractedTextBytes);
+  assert.match(observation.content, /Excerpt truncated/);
 });
 
 test("WebReader timeout and cancellation abort the active request and prevent redirects", async () => {

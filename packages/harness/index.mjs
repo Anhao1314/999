@@ -50,8 +50,10 @@ export {
 } from "./execution-binding.mjs";
 export { STATIC_RESOLVER_TYPE, createStaticWorkerBackendResolver } from "./resolver.mjs";
 export { DEFAULT_WAIT_TIMEOUT_MS, HOST_STATUS, createWorkerHost } from "./host.mjs";
+export { createEmployeeActivationResolver } from "./employee-activation.mjs";
 export { assertActuator, createAuthorizedToolSession, createToolBudget, createToolGrant, ToolSessionError } from "./tool-session.mjs";
 export { assertModelBackend, createTestModelBackend } from "./model-backend.mjs";
+export { createDeepSeekModelBackend, DEEPSEEK_SECRET_NAME, DEEPSEEK_MODEL } from "./deepseek-model-backend.mjs";
 export { createFakeActuator } from "./adapters/fake-actuator.mjs";
 export { assertSearchProvider } from "./search-provider.mjs";
 export { WEB_LIMITS, isPublicIp, parsePublicWebUrl, resolveDns, resolvePublicWebUrl } from "./web-network-policy.mjs";

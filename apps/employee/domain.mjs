@@ -1,7 +1,7 @@
 // Presentation state for the Employee Lobby.
 //
 // Seating/crop algorithms adapted from the user-supplied ai_employee_codexkit
-// core/core.js. Seats and tables are PRESENTATION_ONLY: they never determine
+// core/core.js. Rooms and seats are PRESENTATION_ONLY: they never determine
 // assignment, authority, capability, permission or scheduling.
 //
 // The Lobby speaks the frozen Experience vocabulary and nothing else:
@@ -35,31 +35,37 @@ export const CONNECTION = Object.freeze({
   RUNTIME_UNAVAILABLE: "RUNTIME_UNAVAILABLE",
 });
 
-export function syncSeats(employees, previous = []) {
+export const FLOOR_ROOMS = Object.freeze([
+  { id: 'founder', name: '创始人办公室' },
+  { id: 'research', name: '产品研究' },
+  { id: 'design', name: '设计内容' },
+  { id: 'engineering', name: '工程自动化' },
+  { id: 'delivery', name: '交付运营' },
+  { id: 'collaboration', name: '会议协作' },
+]);
+
+export function syncRooms(employees, previous = []) {
   const active = new Map(employees.map((e) => [e.employeeId, e]));
   if (active.size !== employees.length) throw new Error("Duplicate employee");
   const seen = new Set();
-  const tables = previous.map((t) => ({
-    ...t,
-    seats: t.seats.map((id) => {
-      if (!active.has(id) || seen.has(id)) return null;
-      seen.add(id);
-      return id;
+  const rooms = FLOOR_ROOMS.map(({ id, name }) => ({
+    id, name,
+    seats: (previous.find((room) => room.id === id)?.seats ?? []).map((employeeId) => {
+      if (!active.has(employeeId) || seen.has(employeeId)) return null;
+      seen.add(employeeId);
+      return employeeId;
     }),
   }));
-  const add = () => {
-    const t = { id: `table-${tables.length + 1}`, seats: Array(6).fill(null) };
-    tables.push(t);
-    return t;
-  };
-  while (tables.length < 3) add();
   for (const e of [...active.values()].sort((a, b) => a.employeeId.localeCompare(b.employeeId))) {
     if (seen.has(e.employeeId)) continue;
-    let table = tables.find((t) => t.seats.includes(null));
-    if (!table) table = add();
-    table.seats[table.seats.indexOf(null)] = e.employeeId;
+    const room = rooms.reduce((best, candidate) =>
+      candidate.seats.filter(Boolean).length < best.seats.filter(Boolean).length ? candidate : best,
+    );
+    const empty = room.seats.indexOf(null);
+    if (empty < 0) room.seats.push(e.employeeId);
+    else room.seats[empty] = e.employeeId;
   }
-  return tables;
+  return rooms;
 }
 
 export function cropRect(width, height, zoom = 1, x = 0, y = 0) {
@@ -100,7 +106,7 @@ export class EmployeeStore {
       capturedAt: null,
       summary: { employees: 0, working: 0, available: 0, disabled: 0 },
       employees: [],
-      tables: syncSeats([]),
+      rooms: syncRooms([]),
       connection: CONNECTION.CONNECTING,
     };
     this.listeners = new Set();
@@ -127,7 +133,7 @@ export class EmployeeStore {
     const sameCompany = this.state.companyId === readModel.companyId;
     this.state = {
       ...readModel,
-      tables: syncSeats(readModel.employees, sameCompany ? this.state.tables : []),
+      rooms: syncRooms(readModel.employees, sameCompany ? this.state.rooms : []),
       connection: CONNECTION.LIVE,
     };
     this.emit();

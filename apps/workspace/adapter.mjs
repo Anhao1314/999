@@ -13,7 +13,18 @@ export const EXPERIENCE_PATHS = Object.freeze({
     `/experience/companies/${encodeURIComponent(companyId)}/workspace`,
   employee: (employeeId) => `/experience/employees/${encodeURIComponent(employeeId)}`,
   lineage: (workId) => `/experience/works/${encodeURIComponent(workId)}/lineage`,
+  liveAction: (workId) => `/experience/works/${encodeURIComponent(workId)}/live-action`,
+  artifactReading: (artifactId) => `/experience/artifacts/${encodeURIComponent(artifactId)}/reading`,
 });
+
+// Existing read-only inventory endpoint. Each item is enriched with its
+// Experience lineage before the Work page presents a state or decision.
+export const WORKS_PATH = (companyId) =>
+  `/companies/${encodeURIComponent(companyId)}/works`;
+export const POSITIONS_PATH = (companyId) =>
+  `/companies/${encodeURIComponent(companyId)}/positions`;
+export const EMPLOYEES_PATH = (companyId) =>
+  `/companies/${encodeURIComponent(companyId)}/employees`;
 
 const LIVE_SOURCE = 'live';
 
@@ -67,6 +78,26 @@ export class HttpWorkspaceAdapter {
 
   lineage(workId, signal) {
     return this.request(EXPERIENCE_PATHS.lineage(workId), { signal });
+  }
+
+  liveAction(workId, signal) {
+    return this.request(EXPERIENCE_PATHS.liveAction(workId), { signal });
+  }
+
+  artifactReading(artifactId, signal) {
+    return this.request(EXPERIENCE_PATHS.artifactReading(artifactId), { signal });
+  }
+
+  works(companyId, signal) {
+    return this.request(WORKS_PATH(companyId), { signal }).then((data) => data.works);
+  }
+
+  positions(companyId, signal) {
+    return this.request(POSITIONS_PATH(companyId), { signal }).then((data) => data.positions);
+  }
+
+  employees(companyId, signal) {
+    return this.request(EMPLOYEES_PATH(companyId), { signal }).then((data) => data.employees);
   }
 
   subscribe(companyId, store) {

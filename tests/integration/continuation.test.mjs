@@ -72,7 +72,7 @@ test("a Work the Runtime activated survives kill -9 and converges with no duplic
     // Recovery fences the dead attempt, and the startup drive continues the
     // same Work: a new run, the same single Task and Assignment.
     const after = await runtime.json("/status");
-    assert.equal(after.schemaVersion, 7);
+    assert.equal(after.schemaVersion, 12);
     assert.equal(after.counts.tasks, 1, "no duplicate Task");
     assert.equal(after.counts.assignments, 1, "no duplicate Assignment");
     assert.equal(after.counts.workerRuns, 2, "the interrupted run, and the continuation of it");

@@ -25,10 +25,18 @@ import {
 } from "../work/continuation.mjs";
 import { isKernelError } from "./errors.mjs";
 import { deterministicNextActionProposer } from "../planning/next-action.mjs";
+import {
+  RELAY_SENSE_QUESTIONS,
+  RELAY_SENSE_QUESTION_PACK_VERSION,
+  compileRelaySenseState,
+  relaySenseStateDigest,
+  validateRelaySenseSignals,
+} from "./relay-sense.mjs";
 
 // A wake loop can only be re-entered by the commands it itself runs; this fuse
 // bounds that, exactly as MAX_CONTINUATION_STEPS bounds one drive.
 export const MAX_WAKE_ROUNDS = 64;
+const MAX_PENDING_SHADOW_OBSERVATIONS = 8;
 
 function readWorkTruth(kernel, workId) {
   const work = kernel.work(workId);
@@ -37,6 +45,8 @@ function readWorkTruth(kernel, workId) {
   const tasks = kernel.tasks(workId);
   const employees = kernel.employees(work.companyId);
   const positions = kernel.positions(work.companyId);
+  const hiringByEmployeeId = new Map(employees.map(employee =>
+    [employee.id, kernel.employeeHiring(employee.id)]));
   const requirementsByTask = new Map();
   const assignmentsByTask = new Map();
   for (const task of tasks) {
@@ -54,6 +64,7 @@ function readWorkTruth(kernel, workId) {
     else workerRunsByTask.set(run.taskId, [run]);
   }
   const artifactById = new Map(projection.artifacts.map((artifact) => [artifact.id, artifact]));
+  const dependencies = kernel.store.workDependencies(workId);
   const reviewProducerByTask = new Map();
   for (const request of projection.reviewRequests) {
     const artifact = artifactById.get(request.targetArtifactId);
@@ -66,11 +77,14 @@ function readWorkTruth(kernel, workId) {
     tasks,
     employees,
     positions,
+    hiringByEmployeeId,
     requirementsByTask,
     assignmentsByTask,
     reviewRequests: projection.reviewRequests,
     reviews: projection.reviews,
     repairBindings: projection.repairBindings,
+    dependencies,
+    artifacts: kernel.artifacts({ workId }),
     reviewProducerByTask,
     workerRunsByTask,
     // Availability is the same derivation the rest of the Runtime uses: an
@@ -83,7 +97,7 @@ function readWorkTruth(kernel, workId) {
   };
 }
 
-function boundaryOf(truth) {
+function boundaryOf(truth, activationSkills) {
   return deriveProgressBoundary({
     work: truth.work,
     decision: truth.decision,
@@ -93,8 +107,12 @@ function boundaryOf(truth) {
     reviewRequests: truth.reviewRequests,
     reviews: truth.reviews,
     repairBindings: truth.repairBindings,
+    dependencies: truth.dependencies,
+    artifacts: truth.artifacts,
     employees: truth.employees,
     positions: truth.positions,
+    hiringByEmployeeId: truth.hiringByEmployeeId,
+    activationSkills,
     activeEmployeeIds: truth.activeEmployeeIds,
     reviewProducerByTask: truth.reviewProducerByTask,
     workerRunsByTask: truth.workerRunsByTask,
@@ -106,23 +124,43 @@ export function createContinuationDriver({
   proposer = deterministicNextActionProposer(),
   maxSteps = MAX_CONTINUATION_STEPS,
   observe = true,
+  shadowSensor = null,
+  shadowSensors = null,
+  senseBackends = null,
+  eligibleWork = null,
+  activationSkills = [],
 } = {}) {
   if (!kernel) throw new Error("createContinuationDriver requires a kernel");
   if (!proposer || typeof proposer.propose !== "function")
     throw new Error("createContinuationDriver requires a NextActionProposer");
+  if (eligibleWork !== null && typeof eligibleWork !== "function")
+    throw new Error("eligibleWork must be a predicate");
+  if (!Array.isArray(activationSkills) || activationSkills.some(skill => typeof skill !== "string"))
+    throw new Error("activationSkills must be an explicit Skill list");
+  if ([shadowSensor, shadowSensors, senseBackends].filter((value) => value !== null).length > 1)
+    throw new Error("choose one Relay Sense composition input");
+  const sensors = senseBackends ?? shadowSensors ?? (shadowSensor ? [shadowSensor] : []);
+  if (!Array.isArray(sensors) || sensors.length > 2 ||
+      sensors.some((sensor) => !/^[a-z][a-z0-9-]{0,31}$/.test(sensor?.name ?? "") ||
+        typeof sensor.version !== "string" || sensor.version.length < 1 || sensor.version.length > 80 ||
+        (sensor.role != null && !["CHAMPION", "CHALLENGER"].includes(sensor.role)) ||
+        typeof sensor.sense !== "function") ||
+      new Set(sensors.map((sensor) => sensor.name)).size !== sensors.length)
+    throw new Error("Relay Sense requires up to two distinct typed backends");
 
   const pendingCompanies = new Set();
   const pendingWorks = new Set();
   // True while a drive or a drain owns the loop. Everything the commands of
   // that drive wake is queued and processed by the loop that is already running.
   let driving = false;
+  const pendingShadow = new Set();
 
   // Traces are observability, never truth: a trace write failure is logged and
   // the Driver carries on. It may never invalidate a committed mutation, and
   // nothing reads a trace to decide anything.
   function trace(entry) {
     try {
-      kernel.recordContinuationTrace({
+      const recorded = kernel.recordContinuationTrace({
         companyId: entry.companyId,
         workId: entry.workId,
         step: entry.step,
@@ -139,6 +177,55 @@ export function createContinuationDriver({
         actionResult: entry.actionResult,
         actionErrorCode: entry.actionErrorCode ?? null,
       });
+      // Each backend sees the same bounded snapshot and question pack only
+      // after the original trace is durable. Neither answer can feed an action.
+      for (const [index, sensor] of sensors.entries()) {
+        if (!entry.senseState || pendingShadow.size >= MAX_PENDING_SHADOW_OBSERVATIONS) break;
+        const metadata = {
+          sourceTraceId: recorded.id,
+          senseStateDigest: relaySenseStateDigest(entry.senseState),
+          questionPackVersion: RELAY_SENSE_QUESTION_PACK_VERSION,
+          role: sensor.role ?? (index === 0 ? "CHAMPION" : "CHALLENGER"),
+        };
+        const recordSense = (signals, reasonCodes) => kernel.recordContinuationTrace({
+              companyId: recorded.companyId,
+              workId: recorded.workId,
+              step: recorded.step,
+              triggerType: recorded.triggerType,
+              basisBefore: recorded.basisBefore,
+              basisAfter: recorded.basisAfter,
+              decisionState: recorded.decisionState,
+              decisionStateDigest: recorded.decisionStateDigest,
+              policyVersion: CONTINUATION_POLICY_VERSION,
+              reasonCodes,
+              actionResult: ACTION_RESULTS.DIAGNOSTIC,
+              sensorName: sensor.name,
+              sensorVersion: sensor.version,
+              signals,
+            });
+        const pending = Promise.resolve()
+          .then(() => sensor.sense(structuredClone(entry.senseState), structuredClone(RELAY_SENSE_QUESTIONS)))
+          .then((result) => {
+            const validated = validateRelaySenseSignals(result?.signals ?? result);
+            const model = result?.model ?? sensor.version;
+            if (typeof model !== "string" || model.length < 1 || model.length > 80)
+              throw new Error("invalid Sense model identity");
+            recordSense({ ...metadata, status: "OK", model, ...validated }, ["RELAY_SENSE_OBSERVATION"]);
+          })
+          .catch((error) => {
+            const code = error?.code === "RATE_LIMITED" || error?.code === "TIMEOUT" ? error.code :
+              error?.name === "TimeoutError" || error?.name === "AbortError" ? "TIMEOUT" :
+                error instanceof SyntaxError || /response|signals|probability|choice|model identity|JSON/i.test(error?.message ?? "")
+                  ? "INVALID_OUTPUT" : "UNAVAILABLE";
+            try {
+              recordSense({ ...metadata, status: "FAILED", failureCode: code }, ["RELAY_SENSE_FAILED"]);
+            } catch {
+              process.stderr.write(`Relay Sense trace append failed for ${sensor.name}\n`);
+            }
+          });
+        pendingShadow.add(pending);
+        void pending.finally(() => pendingShadow.delete(pending));
+      }
     } catch (error) {
       process.stderr.write(`continuation trace append failed: ${error?.message ?? error}\n`);
     }
@@ -163,10 +250,14 @@ export function createContinuationDriver({
               reason: "the proposer returned no proposal for an unactivated Work",
             },
           };
+        if (proposal.planKind === "BOUNDED_FAN_IN") {
+          const materialized = kernel.materializeBoundedSwarm({
+            workId: truth.work.id, expectedBasis: truth.basis, proposal,
+          });
+          return { result: ACTION_RESULTS.EXECUTED, targetId: materialized.tasks[0].id };
+        }
         const materialized = kernel.materializeNextAction({
-          workId: truth.work.id,
-          expectedBasis: truth.basis,
-          proposal,
+          workId: truth.work.id, expectedBasis: truth.basis, proposal,
         });
         return { result: ACTION_RESULTS.EXECUTED, targetId: materialized.task.id };
       }
@@ -174,6 +265,7 @@ export function createContinuationDriver({
         const assignment = kernel.assignTask({
           taskId: action.taskId,
           employeeId: action.employeeId,
+          routingPolicyVersion: action.routingPolicyVersion,
           reason:
             boundary.boundary === "INTERRUPTED"
               ? CONTINUATION_REDISPATCH_REASON
@@ -225,7 +317,11 @@ export function createContinuationDriver({
         summary.stopped = "WORK_NOT_FOUND";
         return summary;
       }
-      const boundary = boundaryOf(truth);
+      if (eligibleWork && !eligibleWork(truth.work)) {
+        summary.stopped = "OUT_OF_SCOPE";
+        return summary;
+      }
+      const boundary = boundaryOf(truth, activationSkills);
       summary.boundary = boundary.boundary;
       const decisionState = buildDecisionState({
         work: truth.work,
@@ -235,6 +331,14 @@ export function createContinuationDriver({
         candidates: boundary.candidates,
       });
       const digest = decisionStateDigest(decisionState);
+      let senseState = null;
+      if (sensors.length) {
+        try {
+          senseState = compileRelaySenseState({ decisionState, truth, boundary });
+        } catch (error) {
+          process.stderr.write(`Relay Sense input unavailable: ${error?.message ?? error}\n`);
+        }
+      }
 
       if (!boundary.action) {
         summary.diagnostic = boundary.diagnostic ?? null;
@@ -243,7 +347,7 @@ export function createContinuationDriver({
         // running, waiting on the Founder) is not a continuation decision, so
         // it is not traced. A boundary that stopped because something is
         // missing is.
-        if (boundary.diagnostic)
+        if (boundary.diagnostic || sensors.length)
           trace({
             companyId: truth.work.companyId,
             workId,
@@ -253,9 +357,10 @@ export function createContinuationDriver({
             basisAfter: truth.basis,
             decisionState,
             decisionStateDigest: digest,
+            senseState,
             actionResult: ACTION_RESULTS.DIAGNOSTIC,
-            diagnosticCode: boundary.diagnostic.code,
-            reasonCodes: [boundary.diagnostic.code],
+            diagnosticCode: boundary.diagnostic?.code ?? null,
+            reasonCodes: [boundary.diagnostic?.code ?? boundary.boundary],
           });
         return summary;
       }
@@ -271,6 +376,7 @@ export function createContinuationDriver({
         basisAfter: after?.basis ?? null,
         decisionState,
         decisionStateDigest: digest,
+        senseState,
         actionCommand: boundary.action.command,
         actionTargetId: outcome.targetId ?? null,
         actionResult: outcome.result,
@@ -389,11 +495,17 @@ export function createContinuationDriver({
   // either way — its loop always re-reads truth for itself.
   if (observe) kernel.setContinuationObserver(notify);
 
+  async function flushSense() {
+    while (pendingShadow.size > 0) await Promise.allSettled([...pendingShadow]);
+  }
+
   return {
     driveWork,
     driveAll,
     detach() {
       kernel.setContinuationObserver(null);
     },
+    flushSense,
+    flushShadow: flushSense,
   };
 }

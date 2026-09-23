@@ -15,6 +15,8 @@ import { assertAdapterManifest, assertWorkerAdapter, normalizeAdapterResult } fr
 import { createAuthorizedToolSession, createToolBudget, createToolGrant } from "./tool-session.mjs";
 import { ensureRunWorkspace, leaseStateForRun, runWorkspaceLayout } from "./execution-binding.mjs";
 import { normalizeWorkerEvent } from "./events.mjs";
+import { hostObservedModelExecution } from "./model-execution-provenance.mjs";
+import { isNetworkWebResearchActuator } from "./adapters/web-research-actuator.mjs";
 import {
   buildHarnessEvidence,
   HARNESS_REJECTION_REASONS,
@@ -49,6 +51,7 @@ export function createWorkerHost({
   kernel,
   adapter,
   resolver,
+  activationResolver = null,
   runtimeRoot,
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
   requestedPolicy = defaultRequestedPolicy(),
@@ -57,8 +60,12 @@ export function createWorkerHost({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!kernel) throw new Error("createWorkerHost requires a kernel");
-  assertWorkerAdapter(adapter);
-  if (!resolver || typeof resolver.resolve !== "function")
+  if (activationResolver !== null && typeof activationResolver.activate !== "function")
+    throw new Error("activationResolver requires activate()");
+  if (activationResolver !== null && (adapter || resolver || toolPolicy || artifactPostcondition))
+    throw new Error("Employee Activation owns Adapter, resolver, tool policy and postcondition selection");
+  if (activationResolver === null) assertWorkerAdapter(adapter);
+  if (activationResolver === null && (!resolver || typeof resolver.resolve !== "function"))
     throw new Error("createWorkerHost requires a WorkerBackendResolver");
   if (!runtimeRoot) throw new Error("createWorkerHost requires a runtimeRoot");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1)
@@ -91,6 +98,9 @@ export function createWorkerHost({
   const inFlight = new Map();
   const handles = new Map();
   const sessions = new Map();
+  // Bounded, process-local presentation facts. This is not Company truth or
+  // replay history; the Experience layer may only project selected fields.
+  const publicExecutions = new Map();
   const reports = [];
   let observing = false;
   let stopped = false;
@@ -107,9 +117,9 @@ export function createWorkerHost({
     return entry;
   }
 
-  const safeCancel = async (handle, reason) => {
+  const safeCancel = async (activeAdapter, handle, reason) => {
     try {
-      await adapter.cancel(handle, reason);
+      await activeAdapter.cancel(handle, reason);
     } catch (error) {
       process.stderr.write(`worker adapter cancel failed: ${error?.message ?? error}\n`);
     }
@@ -118,14 +128,14 @@ export function createWorkerHost({
   // The adapter's terminal report, normalized at the Host boundary. A wait that
   // fails, times out or returns something that is not a WorkerAdapterResult is
   // all one thing here: a protocol problem, never a delivery.
-  async function waitWithHostTimeout(handle) {
+  async function waitWithHostTimeout(activeAdapter, handle) {
     let timer = null;
     try {
       const budget = new Promise((resolve) => {
         timer = setTimeout(() => resolve({ kind: "TIMEOUT" }), timeoutMs);
       });
       const settled = Promise.resolve()
-        .then(() => adapter.wait(handle, { timeoutMs }))
+        .then(() => activeAdapter.wait(handle, { timeoutMs }))
         .then((raw) => ({ kind: "SETTLED", result: normalizeAdapterResult(raw) }))
         .catch((error) => ({ kind: "PROTOCOL_ERROR", reason: error?.message ?? String(error) }));
       return await Promise.race([settled, budget]);
@@ -147,21 +157,71 @@ export function createWorkerHost({
     const employee = kernel.employee(run.employeeId);
     const position = kernel.position(run.positionId);
     const company = kernel.company(run.companyId);
-    const resolved = resolver.resolve({ workerRun: run, task, employee, position, company });
+    let activation = null;
+    if (activationResolver) {
+      try {
+        activation = activationResolver.activate({ workerRun: run, task, employee, position, company });
+        if (!activation) throw new Error("no matching Employee Activation");
+        assertWorkerAdapter(activation.adapter);
+        if (!activation.resolution?.backendType || !activation.resolution?.backendVersion)
+          throw new Error("Activation has no backend resolution");
+      } catch {
+        kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
+        report(run.id, run.generation, HOST_STATUS.INTERRUPTED, {
+          reason: "WORKER_EXECUTION_FAILED", detail: "Employee Activation unavailable",
+        });
+        return;
+      }
+    }
+    const activeAdapter = activation?.adapter ?? adapter;
+    const resolved = activation?.resolution ?? resolver.resolve({ workerRun: run, task, employee, position, company });
     if (!resolved) {
       report(run.id, run.generation, HOST_STATUS.DEFERRED_NO_BACKEND, { taskId: run.taskId });
       return;
     }
 
-    const manifest = assertAdapterManifest(await adapter.manifest());
+    let manifest;
+    try {
+      manifest = assertAdapterManifest(await activeAdapter.manifest());
+    } catch (error) {
+      if (!activationResolver) throw error;
+      kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
+      report(run.id, run.generation, HOST_STATUS.INTERRUPTED, {
+        reason: "WORKER_EXECUTION_FAILED", detail: "Activation Adapter manifest unavailable",
+      });
+      return;
+    }
     if (manifest.adapterType !== resolved.backendType) {
-      report(run.id, run.generation, HOST_STATUS.REFUSED, {
+      if (activationResolver)
+        kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
+      report(run.id, run.generation, activationResolver ? HOST_STATUS.INTERRUPTED : HOST_STATUS.REFUSED, {
         code: "ADAPTER_BACKEND_MISMATCH",
         detail: `the resolver chose ${resolved.backendType}; the adapter reports ${manifest.adapterType}`,
       });
       return;
     }
 
+    const activeRequestedPolicy = activation?.requestedPolicy ?? requestedPolicy;
+    const activeArtifactPostcondition = activation?.artifactPostcondition ?? artifactPostcondition;
+    const activeToolPolicy = activationResolver ? activation.toolPolicy ?? null : trustedToolPolicy;
+    let activeBudget = toolBudget;
+    if (activationResolver && activeToolPolicy) {
+      try {
+        const elapsed = activeToolPolicy.budget?.maxElapsedMs ?? timeoutMs;
+        activeBudget = createToolBudget({
+          ...(activeToolPolicy.budget ?? {}), maxElapsedMs: elapsed,
+          toolTimeoutMs: activeToolPolicy.budget?.toolTimeoutMs ?? Math.min(elapsed, 10_000),
+        });
+        if (activeBudget.maxElapsedMs > timeoutMs)
+          throw new Error("Activation ToolBudget exceeds WorkerHost timeoutMs");
+      } catch {
+        kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
+        report(run.id, run.generation, HOST_STATUS.INTERRUPTED, {
+          reason: "WORKER_EXECUTION_FAILED", detail: "Activation ToolBudget invalid",
+        });
+        return;
+      }
+    }
     const layout = runWorkspaceLayout({
       runtimeRoot,
       workId: run.workId,
@@ -187,7 +247,7 @@ export function createWorkerHost({
           backendType: resolved.backendType,
           backendVersion: resolved.backendVersion,
           effectivePolicy,
-          requestedPolicy,
+          requestedPolicy: activeRequestedPolicy,
         }),
         workspaceRoot: layout.workspaceRoot,
         scratchRoot: layout.scratchRoot,
@@ -211,7 +271,7 @@ export function createWorkerHost({
     const input = buildWorkerRunInput({
       run,
       binding,
-      requestedPolicy,
+      requestedPolicy: activeRequestedPolicy,
       effectivePolicy,
       resultContract,
     });
@@ -219,17 +279,26 @@ export function createWorkerHost({
     // A static, trusted policy is supplied by the Host composition. Neither
     // WorkPacket capabilities nor the Adapter can create a ToolGrant.
     let authorizedToolSession = null;
-    if (trustedToolPolicy) {
+    let activeGrant = null;
+    if (activeToolPolicy) {
       try {
         const grant = createToolGrant({
           run,
-          skill: trustedToolPolicy.skill,
-          approvedCapabilities: trustedToolPolicy.approvedCapabilities,
-          actuators: trustedToolPolicy.actuators,
+          skill: activeToolPolicy.skill,
+          approvedCapabilities: activeToolPolicy.approvedCapabilities,
+          actuators: activeToolPolicy.actuators,
         });
         authorizedToolSession = createAuthorizedToolSession({
-          run, grant, budget: toolBudget, actuators: trustedToolPolicy.actuators,
+          run, grant, budget: activeBudget, actuators: activeToolPolicy.actuators,
+          onReceipt: ({ receipt, source, actuator }) => kernel.recordHostToolReceipt({
+            workerRunId: run.id, generation: run.generation,
+            grantDigest: grant.grantDigest, skillId: grant.skillId,
+            skillVersion: grant.skillVersion, receipt, source,
+            actuatorKind: receipt.status === "SUCCEEDED" && source &&
+              isNetworkWebResearchActuator(actuator) ? "NETWORK_WEB_READ" : null,
+          }),
         });
+        activeGrant = grant;
         sessions.set(run.id, authorizedToolSession);
       } catch (error) {
         kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
@@ -238,9 +307,24 @@ export function createWorkerHost({
       }
     }
 
+    if (publicExecutions.size >= 256) publicExecutions.delete(publicExecutions.keys().next().value);
+    publicExecutions.set(run.id, Object.freeze({
+      workerRunId: run.id,
+      skill: activeToolPolicy ? { id: activeToolPolicy.skill.skillId,
+        version: activeToolPolicy.skill.version } : null,
+      model: activation?.modelBackend ?? null,
+      grantedTools: Object.freeze([...(activeGrant?.capabilities ?? [])]),
+      budget: activeBudget ? { maxToolCalls: activeBudget.maxToolCalls,
+        maxCallsByCapability: { ...activeBudget.maxCallsByCapability },
+        maxElapsedMs: activeBudget.maxElapsedMs, toolTimeoutMs: activeBudget.toolTimeoutMs } : null,
+      inputArtifacts: Object.freeze([...(run.workPacket.context?.inputArtifacts ?? [])]
+        .slice(0, 8).map((artifact) => ({ artifactId: artifact.artifactId,
+          title: artifact.title, digest: artifact.artifactDigest }))),
+    }));
+
     let handle = null;
     try {
-      handle = await adapter.start(input, {
+      handle = await activeAdapter.start(input, {
         binding,
         workspaceRoot: layout.workspaceRoot,
         scratchRoot: layout.scratchRoot,
@@ -260,7 +344,7 @@ export function createWorkerHost({
       });
       return;
     }
-    handles.set(run.id, handle);
+    handles.set(run.id, { adapter: activeAdapter, handle });
 
     // A stop can begin while this attempt is still starting: the adapter is
     // provisioning a workspace and has spawned nothing when the Host's stop
@@ -271,7 +355,8 @@ export function createWorkerHost({
     if (stopped) {
       authorizedToolSession?.cancel();
       sessions.delete(run.id);
-      await safeCancel(handle, "HOST_STOPPING");
+      await safeCancel(activeAdapter, handle, "HOST_STOPPING");
+      handles.delete(run.id);
       report(run.id, run.generation, HOST_STATUS.CANCELLED, { reason: "HOST_STOPPING" });
       return;
     }
@@ -279,9 +364,18 @@ export function createWorkerHost({
     const observed = [];
     let eventsError = null;
     let lastAdapterMeta = null;
+    let modelReceiptAttempted = false;
+    const persistModelExecution = () => {
+      if (modelReceiptAttempted) return;
+      modelReceiptAttempted = true;
+      const observation = hostObservedModelExecution(activeAdapter, run.id);
+      if (observation) kernel.recordHostModelExecution({ workerRunId: run.id,
+        generation: run.generation, skillId: activeToolPolicy?.skill.skillId ?? "GenericModelWorker",
+        skillVersion: activeToolPolicy?.skill.version ?? "v0", ...observation });
+    };
     const drain = (async () => {
       try {
-        for await (const raw of adapter.events(handle)) {
+        for await (const raw of activeAdapter.events(handle)) {
           if (observed.length < MAX_OBSERVED_EVENTS) observed.push(normalizeWorkerEvent(raw));
         }
       } catch (error) {
@@ -292,8 +386,9 @@ export function createWorkerHost({
     // One report shape for every interrupted attempt: the Runtime records the
     // fact, the Host says what it observed. Nothing is written on the way.
     const interrupt = async (reason, detail = null, extra = null) => {
+      try { persistModelExecution(); } catch { /* the attempt remains failed */ }
       authorizedToolSession?.cancel();
-      await safeCancel(handle, reason);
+      await safeCancel(activeAdapter, handle, reason);
       kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason });
       await drain.catch(() => {});
       const proposedCode = extra?.failureCode ?? extra?.failureReason ?? reason;
@@ -323,7 +418,7 @@ export function createWorkerHost({
     const refuseCandidate = (detail) => interrupt("WORKER_PROTOCOL_ERROR", detail);
 
     try {
-      const settled = await waitWithHostTimeout(handle);
+      const settled = await waitWithHostTimeout(activeAdapter, handle);
 
       if (settled.kind === "TIMEOUT") {
         await interrupt("WORKER_TIMEOUT");
@@ -408,6 +503,10 @@ export function createWorkerHost({
           resultDigest,
         });
 
+        try { persistModelExecution(); }
+        catch { await interrupt("WORKER_EXECUTION_FAILED", "model provenance persistence failed", {
+          failureCode: "MODEL_EVIDENCE_PERSIST_FAILED" }); return; }
+
         try {
           const delivered = kernel.submitWorkerReviewResult({
             workerRunId: run.id,
@@ -458,10 +557,10 @@ export function createWorkerHost({
         return;
       }
       const proposed = result.proposedArtifacts[0];
-      if (artifactPostcondition) {
+      if (activeArtifactPostcondition) {
         let check;
         try {
-          check = await artifactPostcondition({
+          check = await activeArtifactPostcondition({
             run,
             result,
             proposedArtifact: proposed,
@@ -502,6 +601,10 @@ export function createWorkerHost({
         adapterExecution: adapterResult.adapterMeta?.modelBackendType ? adapterResult.adapterMeta : null,
         resultDigest,
       });
+
+      try { persistModelExecution(); }
+      catch { await interrupt("WORKER_EXECUTION_FAILED", "model provenance persistence failed", {
+        failureCode: "MODEL_EVIDENCE_PERSIST_FAILED" }); return; }
 
       try {
         const delivered = kernel.submitWorkerResult({
@@ -580,7 +683,7 @@ export function createWorkerHost({
       // gone. A stopping Host therefore leaves no execution running behind it,
       // and the Desktop never has to look for processes to kill.
       for (const session of sessions.values()) session.cancel();
-      await Promise.all([...handles.values()].map((handle) => safeCancel(handle, "HOST_STOPPING")));
+      await Promise.all([...handles.values()].map(({ adapter: activeAdapter, handle }) => safeCancel(activeAdapter, handle, "HOST_STOPPING")));
       await this.idle();
     },
     async idle() {
@@ -591,6 +694,39 @@ export function createWorkerHost({
     },
     reportFor(workerRunId) {
       return reports.filter((entry) => entry.workerRunId === workerRunId);
+    },
+    publicRunEvidence(workerRunId) {
+      const execution = publicExecutions.get(workerRunId);
+      if (!execution) return null;
+      const terminal = [...reports].reverse().find((entry) => entry.workerRunId === workerRunId &&
+        entry.detail?.evidence?.toolSession);
+      const snapshot = sessions.get(workerRunId)?.snapshot() ?? terminal?.detail?.evidence?.toolSession ?? null;
+      const modelExecution = terminal?.detail?.evidence?.modelExecution ?? null;
+      return {
+        ...execution,
+        terminal: terminal ? {
+          status: terminal.status,
+          reason: terminal.detail?.reason ?? null,
+          failureCode: terminal.detail?.evidence?.failureCode ?? null,
+          diagnostic: ["unknown model step type", "malformed FINAL_RESULT", "malformed TOOL_REQUEST",
+            "model step is not a bounded object"].includes(terminal.detail?.detail)
+            ? terminal.detail.detail : null,
+        } : null,
+        model: execution.model ?? (modelExecution ? {
+          backendType: modelExecution.backendType,
+          backendVersion: modelExecution.backendVersion,
+        } : null),
+        receipts: (snapshot?.receipts ?? []).slice(0, 33).map((receipt) => ({
+          callId: receipt.callId, capability: receipt.capability, status: receipt.status,
+          inputDigest: receipt.inputDigest, outputDigest: receipt.outputDigest,
+          durationMs: receipt.durationMs, sourceId: receipt.sourceId ?? null,
+        })),
+        sources: (snapshot?.sources ?? []).slice(0, 32).map((source) => ({
+          sourceId: source.sourceId, receiptCallId: source.receiptCallId,
+          safeUrl: source.safeUrl, canonicalUrlDigest: source.canonicalUrlDigest,
+          contentDigest: source.contentDigest, observedAt: source.observedAt,
+        })),
+      };
     },
     leaseState(workerRunId) {
       const run = kernel.workerRun(workerRunId);

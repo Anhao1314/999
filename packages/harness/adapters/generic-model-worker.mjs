@@ -11,6 +11,23 @@ const MAX_CONTEXT_BYTES = 256 * 1024;
 const MAX_MODEL_STEP_BYTES = 128 * 1024;
 
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const adapterBackends = new WeakMap();
+export function runtimeModelBackendForAdapter(adapter) {
+  return adapterBackends.get(adapter) ?? null;
+}
+
+function modelPacketForReview(packet, contract) {
+  if (contract.kind !== "REVIEW_JUDGMENT") return packet;
+  let goal;
+  try { goal = JSON.parse(packet.work.intent); } catch { return packet; }
+  if (goal?.requestKind !== "MarketEntryResearch.v0" || !goal.method) return packet;
+  const copy = structuredClone(packet);
+  delete goal.method;
+  copy.work.intent = JSON.stringify(goal);
+  if (copy.review?.sourceTask) copy.review.sourceTask.intent =
+    "Produce a decision-ready market entry brief from bounded upstream evidence.";
+  return copy;
+}
 
 function normalizeStep(raw) {
   let encoded;
@@ -75,7 +92,7 @@ export function createGenericModelWorkerAdapter({ modelBackend, skill, now = () 
         { role: "user", content: JSON.stringify({
           workerRunId: handle.input.workerRunId,
           generation: handle.input.generation,
-          workPacket: handle.input.workPacket,
+          workPacket: modelPacketForReview(handle.input.workPacket, handle.input.resultContract),
           resultContract: handle.input.resultContract,
         }) },
       ];
@@ -87,6 +104,7 @@ export function createGenericModelWorkerAdapter({ modelBackend, skill, now = () 
           throw new ToolSessionError("CONTEXT_TOO_LARGE", "model context is too large");
         modelSteps += 1;
         const raw = await backend.invoke({
+          workerRunId: handle.input.workerRunId,
           messages: structuredClone(messages),
           tools: [...(session?.capabilities ?? [])],
           resultContract: handle.input.resultContract,
@@ -156,7 +174,7 @@ export function createGenericModelWorkerAdapter({ modelBackend, skill, now = () 
     }
   }
 
-  return Object.freeze({
+  const adapter = Object.freeze({
     manifest() {
       return {
         adapterType: GENERIC_MODEL_WORKER_ADAPTER_TYPE,
@@ -193,4 +211,6 @@ export function createGenericModelWorkerAdapter({ modelBackend, skill, now = () 
       await handle.running;
     },
   });
+  adapterBackends.set(adapter, backend);
+  return adapter;
 }

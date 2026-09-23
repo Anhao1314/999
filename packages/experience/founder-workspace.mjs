@@ -112,6 +112,9 @@ export function projectFounderWorkspace({ kernel, companyId }) {
   const attention = kernel.founderAttention({ companyId: company.id });
   const workforce = deriveWorkforce({ kernel, companyId: company.id });
   const primary = selectPrimaryWork(projections, attention);
+  // This capability marks a real Employee assigned to the Founder-facing
+  // assistant position. The pet surface must never invent an Employee.
+  const assistant = workforce.employees.find((card) => card.capabilities.includes("founder.assistant")) ?? null;
 
   return {
     company: { id: company.id, name: company.name },
@@ -137,6 +140,14 @@ export function projectFounderWorkspace({ kernel, companyId }) {
         }
       : null,
     workforce: workforceSummaryView(workforce),
+    founderAssistant: assistant ? {
+      employeeId: assistant.employeeId,
+      displayName: assistant.displayName,
+      position: assistant.position,
+      availability: assistant.availability,
+      condition: assistant.condition,
+      currentWork: assistant.currentWork,
+    } : null,
     recentDeliveries: recentDeliveries({ kernel, projections }),
     pulse: companyPulse({ projections, attention, workforce }),
   };

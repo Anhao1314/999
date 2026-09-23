@@ -6,6 +6,7 @@
 import { digestOf } from "../work/records.mjs";
 
 export const WORK_PACKET_VERSION = 2;
+export const BOUNDED_INPUT_PACKET_VERSION = 3;
 export const PACKET_ARTIFACT_LIMIT = 20;
 
 const artifactSummary = (artifact) =>
@@ -39,12 +40,13 @@ export function buildWorkPacket({
   position,
   latestCheckpoint = null,
   artifacts = [],
+  inputArtifacts = [],
   review = null,
   repair = null,
 }) {
   const recent = artifacts.slice(-PACKET_ARTIFACT_LIMIT).map(artifactSummary);
   return Object.freeze({
-    packetVersion: WORK_PACKET_VERSION,
+    packetVersion: inputArtifacts.length ? BOUNDED_INPUT_PACKET_VERSION : WORK_PACKET_VERSION,
     company: Object.freeze({ id: company.id, name: company.name }),
     work: Object.freeze({ id: work.id, title: work.title, intent: work.intent }),
     task: Object.freeze({
@@ -76,6 +78,8 @@ export function buildWorkPacket({
       latestCheckpoint: checkpointSummary(latestCheckpoint),
       priorArtifacts: Object.freeze(recent),
       priorArtifactCount: artifacts.length,
+      ...(inputArtifacts.length ? { inputArtifacts: Object.freeze(inputArtifacts.map((artifact) =>
+        Object.freeze({ ...artifact }))) } : {}),
     }),
     review: review ? Object.freeze({ ...review }) : null,
     repair: repair ? Object.freeze({ ...repair }) : null,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EXPERIENCE_PATHS, HttpWorkspaceAdapter } from '../../apps/workspace/adapter.mjs';
+import { EXPERIENCE_PATHS, WORKS_PATH, HttpWorkspaceAdapter } from '../../apps/workspace/adapter.mjs';
 import { CONNECTION, WorkspaceStore, freshness } from '../../apps/workspace/domain.mjs';
 
 const json = (data, status = 200) =>
@@ -15,28 +15,37 @@ const waitFor = async (predicate, timeout = 2000) => {
   throw new Error('condition was not reached in time');
 };
 
-test('the adapter reads exactly the frozen Experience paths', async () => {
+test('the adapter reads Experience paths and the existing Work inventory', async () => {
   assert.equal(EXPERIENCE_PATHS.workspace('cmp_1'), '/experience/companies/cmp_1/workspace');
   assert.equal(EXPERIENCE_PATHS.employee('emp_1'), '/experience/employees/emp_1');
   assert.equal(EXPERIENCE_PATHS.lineage('wrk_1'), '/experience/works/wrk_1/lineage');
+  assert.equal(EXPERIENCE_PATHS.liveAction('wrk_1'), '/experience/works/wrk_1/live-action');
+  assert.equal(EXPERIENCE_PATHS.artifactReading('art_1'), '/experience/artifacts/art_1/reading');
   assert.equal(EXPERIENCE_PATHS.workspace('a/b c'), '/experience/companies/a%2Fb%20c/workspace');
+  assert.equal(WORKS_PATH('a/b c'), '/companies/a%2Fb%20c/works');
 
   const calls = [];
   const adapter = new HttpWorkspaceAdapter({
     fetcher: async (path) => {
       calls.push(path);
-      return json({ ok: true });
+      return json({ ok: true, works: [] });
     },
   });
   await adapter.companies();
   await adapter.workspace('cmp_1');
   await adapter.employeeDetail('emp_1');
   await adapter.lineage('wrk_1');
+  await adapter.liveAction('wrk_1');
+  await adapter.artifactReading('art_1');
+  await adapter.works('cmp_1');
   assert.deepEqual(calls, [
     '/companies',
     '/experience/companies/cmp_1/workspace',
     '/experience/employees/emp_1',
     '/experience/works/wrk_1/lineage',
+    '/experience/works/wrk_1/live-action',
+    '/experience/artifacts/art_1/reading',
+    '/companies/cmp_1/works',
   ]);
 });
 

@@ -1,0 +1,22 @@
+:root {
+  --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+  --ui-ink: #202936;
+  --ui-ink-secondary: #4b586b;
+  --ui-ink-muted: #627084;
+  --ui-blue: #0875df;
+  --ui-blue-soft: #eaf2ff;
+  --ui-attention: #935d19;
+  --ui-attention-soft: #fff3df;
+  --ui-success: #257456;
+  --ui-success-soft: #e7f7ee;
+  --ui-chrome: rgba(245, 250, 255, .76);
+  --ui-card: rgba(250, 253, 255, .88);
+  --ui-card-secondary: rgba(249, 252, 255, .81);
+  --ui-float: rgba(253, 254, 255, .98);
+  --ui-line: rgba(46, 62, 82, .10);
+  --ui-shadow-card: 0 9px 27px rgba(43, 77, 120, .12), inset 0 1px rgba(255, 255, 255, .84);
+  --ui-shadow-float: 0 28px 80px rgba(24, 39, 62, .20), 0 3px 12px rgba(24, 39, 62, .07);
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root { --ui-chrome: #f3f8fe; --ui-card: #fbfdff; --ui-card-secondary: #f8fbff; --ui-float: #fff; }
+}

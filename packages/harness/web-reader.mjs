@@ -9,6 +9,8 @@ import { parsePublicWebUrl, resolvePublicWebUrl, WEB_LIMITS } from "./web-networ
 const fail = (code, message) => new ToolSessionError(code, message);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const CONTENT_TYPES = new Set(["text/html", "text/plain"]);
+const networkReaders = new WeakSet();
+export function isNetworkWebReader(reader) { return networkReaders.has(reader); }
 
 function nodeGet({ url, address, family, signal }) {
   return new Promise((resolve, reject) => {
@@ -78,12 +80,14 @@ function extract(body, contentType) {
   return { title, content };
 }
 
-export function createWebReader({ resolveHost, transport = nodeGet, now = () => new Date().toISOString(), timeoutMs = WEB_LIMITS.durationMs } = {}) {
+export function createWebReader({ resolveHost, transport = nodeGet, now = () => new Date().toISOString(),
+  timeoutMs = WEB_LIMITS.durationMs, sameHostRedirectsOnly = false } = {}) {
   if (resolveHost !== undefined && typeof resolveHost !== "function") throw new Error("resolveHost must be a function");
+  if (typeof sameHostRedirectsOnly !== "boolean") throw new Error("sameHostRedirectsOnly must be boolean");
   if (typeof transport !== "function" || typeof now !== "function") throw new Error("WebReader requires transport and clock functions");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > WEB_LIMITS.durationMs)
     throw new Error("WebReader timeout must be positive and at most the public web limit");
-  return Object.freeze({
+  const reader = Object.freeze({
     async read({ url: rawUrl, signal } = {}) {
       const controller = new AbortController();
       const abort = () => controller.abort();
@@ -94,6 +98,7 @@ export function createWebReader({ resolveHost, transport = nodeGet, now = () => 
       let redirects = 0;
       try {
         url = parsePublicWebUrl(rawUrl);
+        const authorizedHost = url.hostname;
         while (true) {
           if (controller.signal.aborted) throw fail(signal?.aborted ? "ABORTED" : "TOOL_TIMEOUT", "web read cancelled or timed out");
           const pin = await resolvePublicWebUrl(url, { resolveHost, signal: controller.signal });
@@ -120,6 +125,8 @@ export function createWebReader({ resolveHost, transport = nodeGet, now = () => 
             // The next iteration rechecks scheme, host, every DNS answer and
             // pins a newly validated address before connecting.
             url = parsePublicWebUrl(target.href);
+            if (sameHostRedirectsOnly && url.hostname !== authorizedHost)
+              throw fail("WEB_URL_DENIED", "redirect leaves the authorized public host");
             redirects += 1;
             continue;
           }
@@ -129,9 +136,16 @@ export function createWebReader({ resolveHost, transport = nodeGet, now = () => 
             throw fail("WEB_ENCODING_UNSUPPORTED", "compressed web responses are not accepted");
           const type = String(header(response.headers, "content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
           if (!CONTENT_TYPES.has(type)) throw fail("WEB_CONTENT_TYPE_UNSUPPORTED", "web content type is unsupported");
-          const { title, content } = extract(response.body, type);
-          if (!content || Buffer.byteLength(content) > WEB_LIMITS.extractedTextBytes)
-            throw fail("WEB_EXTRACTED_TEXT_TOO_LARGE", "extracted web text is empty or exceeds limit");
+          const extracted = extract(response.body, type);
+          const title = extracted.title;
+          let content = extracted.content;
+          if (!content) throw fail("WEB_EXTRACTED_TEXT_TOO_LARGE", "extracted web text is empty");
+          if (Buffer.byteLength(content) > WEB_LIMITS.extractedTextBytes) {
+            const suffix = " [Excerpt truncated; full page was not observed as model context.]";
+            const limit = WEB_LIMITS.extractedTextBytes - Buffer.byteLength(suffix);
+            while (Buffer.byteLength(content) > limit) content = content.slice(0, Math.max(0, content.length - 256));
+            content = `${content.trimEnd()}${suffix}`;
+          }
           const observedAt = now();
           if (typeof observedAt !== "string" || !Number.isFinite(Date.parse(observedAt)))
             throw fail("WEB_OBSERVATION_INVALID", "web observation clock is invalid");
@@ -153,4 +167,6 @@ export function createWebReader({ resolveHost, transport = nodeGet, now = () => 
       }
     },
   });
+  if (transport === nodeGet) networkReaders.add(reader);
+  return reader;
 }

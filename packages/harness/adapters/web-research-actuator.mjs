@@ -1,7 +1,7 @@
 // Read-only external observation behind the Host's authorized tool session.
 import { ToolSessionError } from "../tool-session.mjs";
 import { assertSearchProvider } from "../search-provider.mjs";
-import { createWebReader } from "../web-reader.mjs";
+import { createWebReader, isNetworkWebReader } from "../web-reader.mjs";
 import { parsePublicWebUrl, WEB_LIMITS } from "../web-network-policy.mjs";
 
 export const WEB_SEARCH = "research.web.search";
@@ -9,11 +9,13 @@ export const WEB_READ = "research.web.read";
 const protocol = (message) => new ToolSessionError("TOOL_PROTOCOL_ERROR", message);
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value, keys) => plain(value) && Object.keys(value).every((key) => keys.includes(key));
+const networkActuators = new WeakSet();
+export function isNetworkWebResearchActuator(actuator) { return networkActuators.has(actuator); }
 
 export function createWebResearchActuator({ searchProvider = null, reader = createWebReader() } = {}) {
   if (searchProvider !== null) assertSearchProvider(searchProvider);
   if (!reader || typeof reader.read !== "function") throw new Error("WebResearchActuator requires WebReader.read()");
-  return Object.freeze({
+  const actuator = Object.freeze({
     // The Host recognizes this trusted output shape and mints sourceId only
     // after a successful read. The Actuator never accepts or creates an ID.
     sourceObservationCapabilities: Object.freeze([WEB_READ]),
@@ -60,4 +62,23 @@ export function createWebResearchActuator({ searchProvider = null, reader = crea
       throw new ToolSessionError("TOOL_PROTOCOL_ERROR", "unsupported web capability");
     },
   });
+  if (isNetworkWebReader(reader)) networkActuators.add(actuator);
+  return actuator;
+}
+
+// URL-scoped wrapper used by Employee Activation. Only a wrapper around the
+// real WebReader transport retains the runtime-network attestation.
+export function createAuthorizedWebReadActuator({ base, allowedUrls } = {}) {
+  if (!base || !(allowedUrls instanceof Set)) throw new Error("authorized web read requires an actuator and URL set");
+  const actuator = Object.freeze({
+    sourceObservationCapabilities: Object.freeze([WEB_READ]),
+    supports: capability => capability === WEB_READ,
+    invoke(request) {
+      if (!allowedUrls.has(parsePublicWebUrl(request?.input?.url).href))
+        throw new ToolSessionError("TOOL_DENIED", "URL was not authorized for this Work");
+      return base.invoke(request);
+    },
+  });
+  if (networkActuators.has(base)) networkActuators.add(actuator);
+  return actuator;
 }

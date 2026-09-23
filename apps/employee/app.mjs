@@ -2,6 +2,7 @@ import {
   AVAILABILITY,
   CONNECTION,
   EmployeeStore,
+  FLOOR_ROOMS,
   cropRect,
   currentRoleOf,
   isWorking,
@@ -10,6 +11,8 @@ import {
 } from './domain.mjs';
 import { HttpEmployeeAdapter } from './adapter.mjs';
 import { validatePortrait } from './avatar.mjs';
+import { symbol } from '/employee-assets/icons.mjs';
+import { createSurfaceMotion } from '/employee-assets/surface-motion.mjs';
 
 const $ = id => document.getElementById(id);
 const node = (tag, text, className) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (className) n.className = className; return n; };
@@ -37,14 +40,32 @@ const activityNames = {
 // Fail closed: an unrecognised kind renders a neutral product phrase, never the
 // raw Runtime identifier.
 const activityText = record => record.summary ?? activityNames[record.kind] ?? '工作已更新';
+const capabilityNames = {
+  'commerce.product.research': '产品研究', 'commerce.user.insights': '用户洞察',
+  'commerce.market.analysis': '市场分析', 'commerce.market.review': '独立复核',
+  'commerce.market.synthesis': '市场进入方案', 'founder.assistant': '创始人协作',
+  'research.interviews': '用户访谈', 'research.synthesis': '研究归纳',
+  'product.strategy': '产品策略', 'product.writing': '产品写作',
+  'design.prototype': '原型设计', 'design.visual': '视觉设计',
+};
+const capabilityName = id => capabilityNames[id] ?? '未命名能力';
 const store = new EmployeeStore();
-const demo = new URLSearchParams(location.search).get('demo') === '1';
+const pageParams = new URLSearchParams(location.search);
+const demo = pageParams.get('demo') === '1';
+const embedded = pageParams.get('embedded') === '1';
+const requestedEmployeeId = embedded && !demo ? pageParams.get('employee') : null;
+const requestedCompanyId = embedded && !demo ? pageParams.get('company') : null;
+let requestedEmployeePending = Boolean(requestedEmployeeId);
+document.body.classList.toggle('fc-embedded', embedded);
 const adapter = demo ? new (await import('./demo.mjs')).DemoEmployeeAdapter() : new HttpEmployeeAdapter();
 const portraits = new Map(), visuals = new Map(), seenMessages = new Set(), animations = new Set();
 let selectedId, page = 'overview', stop = () => {}, currentCompany, dirty = false, pending = false, toastTimer, draftVersion;
 let initialized = false, lastCompany, imageDraft, avatarGeneration = 0, avatarDirty = false, cardSignature = '';
 let cardDetail = null, detailEpoch = 0, lineageView = null;
+let focusedRoom = null, roomReturnFocus = null;
+const returnView = { card: null, avatar: null, lineage: null };
 const reduceQuery = matchMedia('(prefers-reduced-motion: reduce)');
+const inspectorWide = matchMedia('(min-width: 860px)');
 const reduced = () => $('reduce-motion').checked || reduceQuery.matches;
 const activeEmployees = () => store.state.employees;
 const selected = () => store.state.employees.find(e => e.employeeId === selectedId);
@@ -64,23 +85,74 @@ function pill(e) {
 function block(title) { const el = node('section', undefined, 'fc-block'); el.append(node('h3', title)); return el; }
 function notice(text) { return node('div', text, 'fc-notice'); }
 function warning(text) { return node('div', text, 'fc-warning'); }
-function openDialog(id) { const dialog = $(id); dialog._returnFocus = document.activeElement; if (!dialog.open) { dialog.showModal(); history.pushState({ employeeView: id }, '', location.href); } }
+const employeeMotions = new Map();
+function employeeMotion(surface) {
+  if (!employeeMotions.has(surface)) employeeMotions.set(surface, createSurfaceMotion(surface, { reduced }));
+  return employeeMotions.get(surface);
+}
+function animateEmployeeSurface(surface, open, origin) {
+  return employeeMotion(surface).run(open, origin?.getBoundingClientRect(), { left: surface.offsetLeft, top: surface.offsetTop, width: surface.offsetWidth, height: surface.offsetHeight });
+}
+function showEmployeeDialog(id) {
+  if (id === 'card' && inspectorWide.matches) $(id).show();
+  else $(id).showModal();
+}
+inspectorWide.addEventListener('change', () => {
+  const card = $('card');
+  if (!card.open || card.matches(':modal') === !inspectorWide.matches) return;
+  const focused = card.contains(document.activeElement) ? document.activeElement : null;
+  employeeMotion(card).cancel();
+  card.close();
+  showEmployeeDialog('card');
+  focused?.focus({ preventScroll: true });
+});
+function openDialog(id) {
+  const dialog = $(id);
+  if (dialog.open) return;
+  dialog._returnFocus = document.activeElement;
+  const parent = id === 'card' && $('roster').open ? 'roster' : ['avatar', 'lineage'].includes(id) && $('card').open ? 'card' : null;
+  if (id in returnView) returnView[id] = parent;
+  if (parent) $(parent).close();
+  showEmployeeDialog(id);
+  if (id === 'card') document.body.classList.add('fc-inspector-open');
+  void animateEmployeeSurface(dialog, true, dialog._returnFocus);
+  history.pushState({ employeeView: id }, '', location.href);
+}
 function ask(message) {
   if ($('confirmation').open) return Promise.resolve(false);
   const focus = document.activeElement, d = $('confirmation'); $('confirmation-message').textContent = message; d.showModal();
   return new Promise(resolve => { const done = answer => { d.close(); focus?.focus(); resolve(answer); }; $('confirmation-cancel').onclick = () => done(false); $('confirmation-accept').onclick = () => done(true); d.oncancel = e => { e.preventDefault(); done(false); }; });
 }
 async function discard() { return !dirty || await ask('有尚未保存的修改，放弃这些修改？'); }
-async function closeDialog(id, fromHistory = false) {
+if (embedded) window.requestEmbeddedClose = async () => {
+  if ((dirty || avatarDirty) && !await ask('有尚未保存的修改，关闭后将放弃，确定关闭？')) return false;
+  dirty = false;
+  avatarDirty = false;
+  return true;
+};
+async function closeDialog(id, fromHistory = false, restoreParent = true) {
   if ((id === 'card' && !await discard()) || (id === 'avatar' && avatarDirty && !await ask('放弃尚未确认的肖像修改？'))) return false;
   const d = $(id); if (!d.open) return true;
+  if (d._closing) return false;
+  d._closing = true;
+  if (restoreParent) {
+    const finished = await animateEmployeeSurface(d, false, d._returnFocus);
+    d._closing = false;
+    if (!finished) return false;
+  } else { employeeMotion(d).cancel(); d._closing = false; }
   if (id === 'card') { dirty = false; detailEpoch++; cardDetail = null; }
   if (id === 'avatar') { avatarGeneration++; imageDraft = undefined; avatarDirty = false; }
   if (id === 'lineage') lineageView = null;
   d.close();
+  if (id === 'card') document.body.classList.remove('fc-inspector-open');
+  const parent = id in returnView ? returnView[id] : null;
+  if (id in returnView) returnView[id] = null;
+  if (restoreParent && parent === 'roster') renderRoster();
+  if (restoreParent && parent && !$(parent).open) showEmployeeDialog(parent);
+  if (id === 'card') renderWorkforce();
   const origin = d._returnFocus;
   const restored = origin?.isConnected ? origin : [...document.querySelectorAll('[data-employee-id]')].find(el => el.dataset.employeeId === origin?.dataset.employeeId && el.className === origin?.className && (el.closest('dialog')?.open ?? true));
-  (restored ?? $('open-roster')).focus();
+  if (restoreParent) (restored ?? $('open-roster')).focus();
   if (!fromHistory && history.state?.employeeView === id) history.back();
   return true;
 }
@@ -88,7 +160,7 @@ document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click
 for (const id of ['roster','card','avatar','lineage']) $(id).addEventListener('cancel', e => { e.preventDefault(); closeDialog(id); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Tab') return;
-  const dialog = ['confirmation','avatar','lineage','card','roster'].map($).find(d => d.open);
+  const dialog = ['confirmation','avatar','lineage','card','roster'].map($).find(d => d.open && d.matches(':modal'));
   if (!dialog) return;
   const controls = [...dialog.querySelectorAll('button,a[href],input,select,textarea,[tabindex]')].filter(el => !el.matches(':disabled') && el.tabIndex >= 0 && el.getClientRects().length);
   const first = controls[0], last = controls.at(-1);
@@ -96,13 +168,33 @@ document.addEventListener('keydown', e => {
   if (e.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
 });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !$('card').open || $('card').matches(':modal')) return;
+  if (['avatar', 'lineage', 'confirmation', 'roster'].some(id => $(id).open)) return;
+  e.preventDefault();
+  void closeDialog('card');
+});
+document.addEventListener('pointerdown', e => {
+  if (!$('card').open || $('card').matches(':modal') || $('card').contains(e.target) || e.target.closest?.('[data-employee-id]')) return;
+  void closeDialog('card', false, false);
+});
 window.addEventListener('popstate', async () => {
   const top = ['avatar','lineage','card','roster'].find(id => $(id).open);
   if (top && history.state?.employeeView !== top && !await closeDialog(top, true)) history.pushState({ employeeView: top }, '', location.href);
 });
 function openCard(id) {
+  if (focusedRoom) {
+    const returnButton = roomReturnFocus;
+    closeRoomFocus(false);
+    returnButton?.focus({ preventScroll: true });
+  }
+  if ($('card').open && id === selectedId) { $('card').querySelector('.fc-identity-name')?.focus({ preventScroll: true }); return; }
+  if ($('card').open) $('card')._returnFocus = document.activeElement;
   selectedId = id; page = 'overview'; dirty = false; cardDetail = null; cardSignature = '';
   renderCard(); openDialog('card'); $('card-body').scrollTop = 0;
+  $('card').querySelector('.fc-identity-name')?.focus({ preventScroll: true });
+  renderWorkforce();
+  if (!$('card')._returnFocus?.isConnected) $('card')._returnFocus = [...$('workforce-list').querySelectorAll('[data-employee-id]')].find(item => item.dataset.employeeId === id) ?? $('open-roster');
   loadDetail(id);
 }
 async function loadDetail(id) {
@@ -116,15 +208,31 @@ async function loadDetail(id) {
   }
 }
 async function navigate(next) { if (!await discard()) return; dirty = false; page = next; renderCard(); $('card-body').scrollTop = 0; }
-$('open-roster').onclick = () => { renderRoster(); openDialog('roster'); };
+$('open-roster').onclick = () => { $('workforce-search').scrollIntoView({ block: 'nearest', behavior: reduced() ? 'auto' : 'smooth' }); $('workforce-search').focus(); };
 $('search').oninput = renderRoster; $('filter').onchange = renderRoster;
+async function focusEmployeeSearch() {
+  for (const id of ['avatar', 'lineage', 'card']) if ($(id).open && !await closeDialog(id)) return;
+  $('workforce-search').focus();
+}
+document.addEventListener('keydown', event => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    void focusEmployeeSearch();
+  }
+});
+$('search').addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown') {
+    const first = $('grid').querySelector('.fc-roster-item');
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
 $('reduce-motion').checked = reduceQuery.matches;
 function reduceMotion() { document.body.classList.toggle('fc-reduced', reduced()); if (reduced()) for (const a of animations) a.finish(); }
 $('reduce-motion').onchange = reduceMotion; reduceQuery.addEventListener('change', reduceMotion); reduceMotion();
 document.addEventListener('visibilitychange', () => { document.body.classList.toggle('fc-hidden', document.hidden); for (const a of animations) document.hidden ? a.pause() : a.play(); });
 
 function rosterMatch(e) {
-  const filter = $('filter').value;
+  const filter = $('filter').querySelector('input:checked')?.value ?? 'all';
   if (filter === 'all') return true;
   if (filter === 'CHECK') return needsFounderCheck(e);
   return e.availability === filter;
@@ -139,52 +247,177 @@ function renderRoster() {
   $('grid').replaceChildren(...(items.length ? items : [node('p', '没有符合条件的员工。', 'fc-empty')]));
   if (focusId) [...$('grid').children].find(e => e.dataset.employeeId === focusId)?.focus();
 }
-function position(tableIndex, seat) {
-  const x = 290 + tableIndex % 3 * 290, y = 130 + Math.floor(tableIndex / 3) * 240;
-  const offsets = [[-57,-55],[57,-55],[108,22],[57,89],[-57,89],[-108,22]];
-  return { x: x + offsets[seat][0], y: y + offsets[seat][1], cx: x, cy: y };
+function roomElement(id) { return [...$('rooms').children].find((room) => room.dataset.roomId === id); }
+function roomEntry(id) { return roomElement(id)?.querySelector('.fc-room-entry'); }
+
+function closeRoomFocus(restoreFocus = true) {
+  if (!focusedRoom) return;
+  const origin = roomReturnFocus;
+  focusedRoom = null;
+  roomReturnFocus = null;
+  const surface = $('room-focus');
+  if (!restoreFocus) { employeeMotion(surface).cancel(); surface.hidden = true; }
+  else void animateEmployeeSurface(surface, false, origin).then((finished) => { if (finished && !focusedRoom) surface.hidden = true; });
+  $('scene').classList.remove('is-focused');
+  for (const room of $('rooms').children) room.dataset.focused = 'false';
+  if (restoreFocus) (origin?.isConnected ? origin : roomEntry(origin?.dataset.roomId))?.focus({ preventScroll: true });
 }
+
+function renderRoomFocus(state) {
+  if (!focusedRoom) return;
+  const room = state.rooms.find((item) => item.id === focusedRoom);
+  if (!room) { closeRoomFocus(false); return; }
+  const people = room.seats.filter(Boolean).map((id) => state.employees.find((entry) => entry.employeeId === id)).filter(Boolean);
+  $('room-focus-title').textContent = `${room.name} · ${people.length} 位成员`;
+  const list = $('room-focus-list');
+  const signature = JSON.stringify(people.map((person) => [person.employeeId, person.displayName, person.position?.title, person.availability]));
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.employeeId : null;
+  list.replaceChildren(...(people.length ? people.map((person) => {
+    const item = button('', () => openCard(person.employeeId), 'fc-room-member');
+    item.dataset.employeeId = person.employeeId;
+    item.append(symbol('employees'), node('span', person.displayName), node('small', person.position?.title ?? '未设置岗位'), pill(person));
+    return item;
+  }) : [node('p', '这个展示分区目前没有员工。', 'fc-room-empty')]));
+  if (focusedId) [...list.querySelectorAll('[data-employee-id]')].find((item) => item.dataset.employeeId === focusedId)?.focus({ preventScroll: true });
+}
+
+function openRoomFocus(id, origin) {
+  focusedRoom = id;
+  roomReturnFocus = origin;
+  $('room-focus-list').dataset.signature = '';
+  $('room-focus').hidden = false;
+  $('scene').classList.add('is-focused');
+  for (const room of $('rooms').children) room.dataset.focused = String(room.dataset.roomId === id);
+  renderRoomFocus(store.state);
+  roomElement(id)?.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
+  void animateEmployeeSurface($('room-focus'), true, origin);
+  $('room-focus-close').focus({ preventScroll: true });
+}
+
+$('room-focus-close').addEventListener('click', () => closeRoomFocus());
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && focusedRoom && !['roster', 'card', 'avatar', 'lineage', 'confirmation'].some((id) => $(id).open)) {
+    event.preventDefault();
+    closeRoomFocus();
+  }
+});
+document.addEventListener('pointerdown', (event) => {
+  if (focusedRoom && !$('room-focus').contains(event.target) && !$('rooms').contains(event.target)) closeRoomFocus(false);
+});
+
 function renderLobby(state) {
   const companyChanged = lastCompany !== state.companyId;
-  if (companyChanged) { for (const a of animations) a.cancel(); animations.clear(); visuals.clear(); $('sprites').replaceChildren(); initialized = false; lastCompany = state.companyId; seenMessages.clear(); }
-  const tableSignature = JSON.stringify(state.tables);
-  if ($('tables').dataset.signature !== tableSignature) {
-    $('tables').dataset.signature = tableSignature; const elements = [];
-    state.tables.forEach((table, i) => { const center = position(i, 0); const t = node('div', `TABLE ${String(i + 1).padStart(2, '0')}`, 'fc-table'); t.style.left = `${center.cx - 82}px`; t.style.top = `${center.cy - 32}px`; elements.push(t);
-      table.seats.forEach((_, j) => { const p = position(i, j), chair = node('div', undefined, 'fc-seat'); chair.style.left = `${p.x - 17}px`; chair.style.top = `${p.y + 4}px`; elements.push(chair); }); });
-    $('tables').replaceChildren(...elements);
-    $('scene').style.height = `${Math.max(490, Math.ceil(state.tables.length / 3) * 240 + 80)}px`;
+  if (companyChanged) {
+    closeRoomFocus(false);
+    for (const a of animations) a.cancel();
+    animations.clear(); visuals.clear(); $('rooms').replaceChildren();
+    initialized = false; lastCompany = state.companyId; seenMessages.clear();
   }
-  const currentIds = new Set(activeEmployees().map(e => e.employeeId));
-  for (const [id, v] of visuals) if (!currentIds.has(id)) { v.animation?.cancel(); v.el.remove(); clearTimeout(v.talkTimer); visuals.delete(id); }
-  state.tables.forEach((table, i) => table.seats.forEach((id, j) => {
-    const e = state.employees.find(entry => entry.employeeId === id); if (!e) return; const p = position(i, j); let v = visuals.get(id);
-    if (!v) {
-      const el = button('', () => openCard(id), 'fc-person'), sprite = node('span', undefined, 'fc-sprite'), label = node('span', undefined, 'fc-person-label'); el.dataset.employeeId = id; sprite.style.backgroundImage = `url('/employee-assets/assets/sprite-${spriteNumber(e)}.png')`; el.append(sprite, label); $('sprites').append(el); v = { el, label }; visuals.set(id, v);
-      if (initialized && connected() && !reduced()) {
-        const aisle = p.cy + 118, sideX = j < 3 ? p.cx + 120 : p.cx - 120;
-        const points = [[70,120],[140,120],[140,aisle],[sideX,aisle],[sideX,p.y],[p.x,p.y]];
-        const animation = el.animate(points.map(([x, y]) => ({ left: `${x}px`, top: `${y}px` })), { duration: 2200, easing: 'linear' });
-        v.animation = animation; el.dataset.walking = 'true'; animations.add(animation);
-        animation.onfinish = animation.oncancel = () => { delete el.dataset.walking; animations.delete(animation); v.animation = null; };
-      }
+  if (!$('rooms').childElementCount) for (const room of FLOOR_ROOMS) {
+    const section = node('section', undefined, 'fc-floor-room');
+    section.dataset.roomId = room.id;
+    section.dataset.focused = 'false';
+    section.addEventListener('click', (event) => { if (!event.target.closest('button')) openRoomFocus(room.id, entry); });
+    const entry = button('', () => openRoomFocus(room.id, entry), 'fc-room-entry');
+    entry.dataset.roomId = room.id;
+    const name = node('strong', room.name);
+    const count = node('span', '0 位', 'fc-room-count');
+    const roomIcons = { founder: 'workspace', research: 'knowledge', design: 'artifacts', engineering: 'settings', delivery: 'work', collaboration: 'employees' };
+    entry.append(symbol(roomIcons[room.id]), name, count);
+    const stage = node('div', undefined, 'fc-room-stage');
+    const extra = node('span', undefined, 'fc-room-extra');
+    section.append(entry, stage, extra);
+    $('rooms').append(section);
+  }
+  const visibleIds = new Set(state.rooms.flatMap((room) => room.seats.filter(Boolean).slice(0, 4)));
+  for (const [id, visual] of visuals) if (!visibleIds.has(id)) {
+    visual.animation?.cancel(); visual.el.remove(); clearTimeout(visual.talkTimer); visuals.delete(id);
+  }
+  for (const room of state.rooms) {
+    const section = roomElement(room.id);
+    if (!section) continue;
+    const ids = room.seats.filter(Boolean);
+    section.querySelector('.fc-room-count').textContent = `${ids.length} 位`;
+    section.querySelector('.fc-room-entry').setAttribute('aria-label', `聚焦${room.name}，${ids.length}位成员；展示分区`);
+    const extra = section.querySelector('.fc-room-extra');
+    extra.textContent = ids.length > 4 ? `另有 ${ids.length - 4} 位 · 点击区域查看` : ids.length ? '点击区域查看全部成员' : '预留办公空间';
+    const stage = section.querySelector('.fc-room-stage');
+    for (const id of ids.slice(0, 4)) {
+      const person = state.employees.find((entry) => entry.employeeId === id);
+      if (!person) continue;
+      let visual = visuals.get(id);
+      if (!visual) {
+        const el = button('', () => openCard(id), 'fc-person');
+        const sprite = node('span', undefined, 'fc-sprite');
+        const label = node('span', undefined, 'fc-person-label');
+        el.dataset.employeeId = id;
+        sprite.style.backgroundImage = `url('/employee-assets/assets/sprite-${spriteNumber(person)}.png')`;
+        el.append(sprite, label);
+        stage.append(el);
+        visual = { el, label };
+        visuals.set(id, visual);
+        if (initialized && connected() && !reduced()) {
+          const animation = el.animate([{ opacity: 0, transform: 'translateY(12px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 360, easing: 'cubic-bezier(.2,.82,.22,1)' });
+          visual.animation = animation;
+          animations.add(animation);
+          animation.onfinish = animation.oncancel = () => { animations.delete(animation); visual.animation = null; };
+        }
+      } else if (visual.el.parentElement !== stage) stage.append(visual.el);
+      visual.label.textContent = person.displayName;
+      const role = currentRoleOf(person);
+      visual.el.dataset.status = person.availability;
+      visual.el.dataset.role = role ?? '';
+      visual.el.dataset.condition = needsFounderCheck(person) ? 'check' : '';
+      visual.el.setAttribute('aria-label', `${person.displayName}，${person.position?.title ?? '未设置岗位'}，${availabilityNames[person.availability] ?? person.availability}${isWorking(person) && role ? `，${roleNames[role]}` : ''}${needsFounderCheck(person) ? '，执行状态需要检查' : ''}`);
+      if (!visual.talking || !connected()) visual.el.dataset.action = visualAction(state, person);
+      if (!connected()) { visual.animation?.finish(); clearTimeout(visual.talkTimer); visual.talking = false; }
     }
-    v.el.style.left = `${p.x}px`; v.el.style.top = `${p.y}px`; v.label.textContent = e.displayName;
-    const role = currentRoleOf(e);
-    v.el.dataset.status = e.availability;
-    v.el.dataset.role = role ?? '';
-    v.el.dataset.condition = needsFounderCheck(e) ? 'check' : '';
-    v.el.setAttribute('aria-label', `${e.displayName}，${e.position?.title ?? '未设置岗位'}，${availabilityNames[e.availability] ?? e.availability}${isWorking(e) && role ? `，${roleNames[role]}` : ''}${needsFounderCheck(e) ? '，执行状态需要检查' : ''}`);
-    if (!v.talking || !connected()) v.el.dataset.action = visualAction(state, e);
-    if (!connected()) { v.animation?.finish(); clearTimeout(v.talkTimer); v.talking = false; }
-  }));
+  }
   if (initialized && connected() && state.source === 'mock') for (const event of state.activity ?? []) if (event.kind === 'message.sent' && !seenMessages.has(event.id)) {
     seenMessages.add(event.id);
     for (const id of [event.employeeId, event.toEmployeeId]) { const v = visuals.get(id); if (!v) continue; clearTimeout(v.talkTimer); v.talking = true; v.el.dataset.action = 'talking'; v.talkTimer = setTimeout(() => { v.talking = false; const e = store.state.employees.find(entry => entry.employeeId === id); if (e) v.el.dataset.action = visualAction(store.state, e); }, 3000); }
   }
   if (!initialized) for (const event of state.activity ?? []) seenMessages.add(event.id);
+  renderRoomFocus(state);
   if (connected()) initialized = true;
 }
+function renderWorkforce() {
+  const query = $('workforce-search').value.trim().toLocaleLowerCase();
+  const filter = $('workforce-filter').value;
+  const people = activeEmployees().filter(e =>
+    (filter === 'all' || e.availability === filter)
+    && `${e.displayName} ${e.position?.title ?? ''}`.toLocaleLowerCase().includes(query));
+  $('workforce-count').textContent = `${activeEmployees().length} 位员工`;
+  const signature = JSON.stringify([currentCompany, selectedId, $('card').open, query, filter, people.map(e => [e.employeeId, e.displayName, e.position?.title, e.availability, e.currentWork?.title, e.capabilities])]);
+  if ($('workforce-list').dataset.signature === signature) return;
+  $('workforce-list').dataset.signature = signature;
+  const focusedId = $('workforce-list').contains(document.activeElement) ? document.activeElement.dataset.employeeId : null;
+  const cards = people.map(e => {
+    const item = button('', () => openCard(e.employeeId), 'fc-workforce-item');
+    item.dataset.employeeId = e.employeeId;
+    item.setAttribute('aria-pressed', String($('card').open && e.employeeId === selectedId));
+    const img = node('img'); img.src = portrait(e); img.alt = '';
+    const identity = node('span', undefined, 'fc-workforce-identity');
+    identity.append(node('strong', e.displayName), node('span', e.position?.title ?? '岗位尚未提供'));
+    const context = node('span', e.currentWork?.title ? `当前工作 · ${e.currentWork.title}`
+      : e.capabilities?.length ? `岗位声明 · ${capabilityName(e.capabilities[0])}` : '能力依据尚未提供', 'fc-workforce-context');
+    item.append(img, identity, pill(e), context);
+    item.setAttribute('aria-label', `${e.displayName}，${e.position?.title ?? '岗位尚未提供'}，${availabilityNames[e.availability] ?? '状态未知'}，${context.textContent}`);
+    return item;
+  });
+  $('workforce-list').replaceChildren(...(cards.length ? cards : [node('p', query || filter !== 'all' ? '没有符合条件的员工。' : store.state.connection === CONNECTION.CONNECTING ? '正在读取员工…' : '当前公司暂无员工记录。', 'fc-workforce-empty')]));
+  if (focusedId) [...$('workforce-list').querySelectorAll('[data-employee-id]')].find(item => item.dataset.employeeId === focusedId)?.focus({ preventScroll: true });
+}
+$('workforce-search').addEventListener('input', renderWorkforce);
+$('workforce-search').addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown') {
+    const first = $('workforce-list').querySelector('button');
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
+$('workforce-filter').addEventListener('change', renderWorkforce);
 function render(state) {
   const employees = activeEmployees(); $('count').textContent = employees.length;
   const summary = state.summary ?? { employees: employees.length, working: 0, available: 0, disabled: 0 };
@@ -199,8 +432,12 @@ function render(state) {
       ? '正在连接本地 Runtime…'
       : demo
         ? '模拟数据 · 所有运行、命令和配置仅用于交互演示，不连接模型。'
-        : `真实 Runtime · Experience 投影 · 每 2 秒同步${employees.length ? '' : ' · 当前公司暂无员工。'}`;
-  renderLobby(state); if ($('roster').open) renderRoster();
+        : `公司记录 · 自动更新${employees.length ? '' : ' · 当前公司暂无员工。'}`;
+  renderLobby(state); renderWorkforce(); if ($('roster').open) renderRoster();
+  if (requestedEmployeePending && state.connection === CONNECTION.LIVE && (!requestedCompanyId || requestedCompanyId === currentCompany) && activeEmployees().some(e => e.employeeId === requestedEmployeeId)) {
+    requestedEmployeePending = false;
+    queueMicrotask(() => { if (currentCompany === state.companyId && activeEmployees().some(e => e.employeeId === requestedEmployeeId)) openCard(requestedEmployeeId); });
+  }
   if ($('card').open) {
     if (!selected()) closeDialog('card');
     else if (page === 'overview' || page === 'details' || page === 'settings') {
@@ -210,62 +447,93 @@ function render(state) {
     else { $('card-footer').querySelectorAll('[data-command]').forEach(b => b.disabled = pending || !connected()); }
   }
   const events = state.source === 'mock' ? (state.activity ?? []).slice(0, 3) : [];
-  $('feed').replaceChildren(...(events.length ? events.map(e => { const a = node('article'); a.append(node('time', new Date(e.at).toLocaleTimeString('zh-CN')), node('span', e.summary)); return a; }) : [node('div', '公司级活动流尚未接入 Experience API（v0A 已知缺口）。员工级近期公开活动请打开员工卡查看。', 'fc-empty')]));
+  $('feed').replaceChildren(...(events.length ? events.map(e => { const a = node('article'); a.append(node('time', new Date(e.at).toLocaleTimeString('zh-CN')), node('span', e.summary)); return a; }) : [node('div', '目前没有可核对的公司级行动记录。打开员工卡可查看员工近期公开活动。', 'fc-empty')]));
 }
 const unsubscribe = store.subscribe(render);
 
 function activityList(detail) {
   return detail?.recentActivity ?? [];
 }
-function overview(e) {
-  const wrap = node('div', undefined, 'fc-overview'), left = node('div'), right = node('div');
-  const detail = cardDetail ?? {};
-  const work = e.currentWork ?? null;
-  const photo = node('div', undefined, 'fc-portrait'), img = node('img'); img.src = portrait(e); img.alt = `${e.displayName}的本地肖像`; photo.append(img, button('▧ 更换肖像', openAvatar)); left.append(photo);
-  const live = block('近期公开活动'), log = node('div', undefined, 'fc-mini-log'); log.setAttribute('aria-label', '近期公开活动');
-  const events = activityList(detail).slice(0, 5);
-  for (const a of events) { const p = node('p', activityText(a)); if (a.createdAt) p.append(node('time', new Date(a.createdAt).toLocaleString('zh-CN'))); else if (a.at) p.append(node('time', new Date(a.at).toLocaleTimeString('zh-CN'))); log.append(p); }
-  if (!events.length) log.append(node('p', isWorkingWorker(e) || work ? '这条工作还没有公开活动记录。' : '没有公开记录'));
-  live.append(log); left.append(live);
-  const identity = block('员工身份'); identity.classList.add('fc-identity'); identity.append(node('h2', e.displayName), pill(e), node('div', e.employeeId, 'fc-id'), node('div', e.position?.title ?? '未设置岗位', 'fc-role'), node('p', demo ? '合成演示角色，用于验证界面交互。' : '长期员工身份 · 独立于任何一次执行')); right.append(identity);
-  if (needsFounderCheck(e)) right.append(warning('执行状态异常，需要检查：该员工同时有多个执行中的尝试，Runtime 未指定唯一当前工作。'));
-  const workBlock = block(work ? '当前工作' : '当前状态');
+function overview(e, activationOpen = false) {
+  const wrap = node('div', undefined, 'fc-id-inspector');
+  const detail = cardDetail ?? null, work = e.currentWork ?? null;
+  const identity = node('section', undefined, 'fc-id-hero');
+  const photo = node('div', undefined, 'fc-id-portrait'), img = node('img');
+  img.src = portrait(e); img.alt = ''; photo.append(img); identity.append(photo);
+  const name = node('div', undefined, 'fc-id-intro');
+  const heading = node('h2', e.displayName, 'fc-identity-name'); heading.tabIndex = -1;
+  name.append(heading, node('p', e.position?.title ?? '岗位尚未提供', 'fc-id-position'), pill(e));
+  name.append(node('p', demo ? '模拟员工 · 仅用于交互演示' : '长期员工身份 · 不随 WorkerRun 更换', 'fc-id-tenure'));
+  identity.append(name); wrap.append(identity);
+  const record = node('div', undefined, 'fc-id-record');
+  record.append(node('span', '组织编号'), node('strong', '尚未提供'), node('span', '入职记录'), node('strong', '尚未接入'));
+  wrap.append(record);
+  if (needsFounderCheck(e)) wrap.append(warning('该员工有多个执行中的尝试，Runtime 尚未确定唯一当前工作。'));
+
+  const now = block('此刻'); now.classList.add('fc-id-section');
+  now.append(node('p', e.availability === AVAILABILITY.DISABLED ? '已停用未来派工；历史记录仍可查看。' : work ? `当前工作：${work.title}` : e.availability === AVAILABILITY.WORKING ? '工作中，但当前工作尚未确定。' : '目前可用，没有进行中的工作。'));
   if (work) {
-    workBlock.append(node('p', work.title));
-    const role = work.role ? roleNames[work.role] : '角色未定';
-    workBlock.append(node('p', `${role} · 第 ${work.attempt} 次尝试 / 上限 ${work.maxAutonomousAttempts}`));
-    if (!demo) workBlock.append(button('查看工作线 →', () => openLineage(work.workId)));
-  } else {
-    workBlock.append(node('p', e.availability === AVAILABILITY.WORKING ? '工作中：Runtime 未给出唯一当前工作。' : '当前没有执行中的工作。'));
+    now.append(node('p', `当前参与：${work.role ? roleNames[work.role] : '角色未提供'}`));
+    if (!demo) now.append(button('查看工作线', () => openLineage(work.workId)));
   }
-  right.append(workBlock);
-  const execution = block('执行后端');
-  if (e.execution) execution.append(node('p', `${e.execution.backendType} · ${e.execution.backendVersion}`), node('p', '执行细节不进入员工身份。'));
-  else execution.append(node('p', needsFounderCheck(e) ? '多个执行中的尝试：不指定单一执行后端。' : '当前没有执行中的尝试。'));
-  right.append(execution);
-  if (demo) {
-    const usage = block('模拟 Token 用量 / 单次预算 (demo)');
-    const used = e.demo?.tokenUsed, limit = e.demo?.tokenLimit;
-    usage.append(node('div', `${used ?? '未提供'} / ${limit ?? '未提供'}`, 'fc-token'));
-    usage.append(node('p', '模拟配额消耗，不是任务进度，也不写入 Runtime。'));
-    right.append(usage);
+  wrap.append(now);
+
+  const capability = block('能力与依据'); capability.classList.add('fc-id-section');
+  if (e.capabilities?.length) for (const id of e.capabilities) {
+    const row = node('div', undefined, 'fc-id-capability');
+    row.append(node('strong', capabilityName(id)), node('span', '岗位声明'));
+    capability.append(row);
   }
-  const skills = block('岗位能力'), tags = node('div', undefined, 'fc-tags'); for (const s of e.capabilities ?? []) tags.append(node('span', s)); if (!tags.children.length) tags.append(node('span', '未提供')); skills.append(tags); right.append(skills);
-  const tools = block('工具 / 权限'); tools.append(node('p', '未接入工具与授权目录')); right.append(tools); wrap.append(left, right); return wrap;
+  else capability.append(node('p', '岗位尚未声明预期能力。'));
+  capability.append(node('p', '当前投影没有逐项能力证据。岗位声明不等于试用验证或已证明；近期交付也不会自动升级能力。', 'fc-id-evidence-note'));
+  wrap.append(capability);
+
+  const historyBlock = block('近期记录'); historyBlock.classList.add('fc-id-section');
+  historyBlock.append(node('p', '这里只显示当前可核对的有界记录，不代表完整履历。'));
+  if (!detail) historyBlock.append(node('p', '正在读取近期交付与公开活动…'));
+  else {
+    const deliveries = detail.recentDeliveries ?? [];
+    for (const item of deliveries.slice(0, 3)) {
+      const row = node('div', undefined, 'fc-id-history-item');
+      row.append(node('strong', item.title ?? '未命名交付'), node('span', item.workTitle ?? '所属工作未提供'));
+      if (item.acceptedState === 'ACCEPTED') row.append(node('small', 'Founder 已接受'));
+      else if (item.reviewState === 'PASS') row.append(node('small', '评审通过 · 尚非 Founder 接受'));
+      historyBlock.append(row);
+    }
+    if (!deliveries.length) historyBlock.append(node('p', '当前窗口没有交付记录。'));
+    const events = activityList(detail).slice(0, 3);
+    for (const event of events) historyBlock.append(node('p', activityText(event), 'fc-id-activity'));
+    if (!events.length) historyBlock.append(node('p', '当前窗口没有公开活动。'));
+  }
+  wrap.append(historyBlock);
+
+  const access = block('访问范围'); access.classList.add('fc-id-section');
+  access.append(node('p', '当前员工投影没有权限目录。不能由岗位或能力推断工具访问。'));
+  wrap.append(access);
+  const activation = node('details', undefined, 'fc-activation-details fc-id-advanced'); activation.open = activationOpen;
+  activation.append(node('summary', '本次执行与技术记录'));
+  activation.append(node('p', work ? `当前尝试：第 ${work.attempt ?? '—'} 次；上限 ${work.maxAutonomousAttempts ?? '未提供'}。` : '当前没有执行中的尝试。'));
+  activation.append(node('p', e.execution ? `执行后端：${[e.execution.backendType, e.execution.backendVersion].filter(Boolean).join(' · ')}` : '执行后端与模型未在当前记录中提供。'));
+  activation.append(node('p', '本次工具授权与可用 Skill 尚未接入。'));
+  activation.append(node('p', `真实员工 ID：${e.employeeId}`));
+  if (e.capabilities?.length) activation.append(node('p', `岗位声明 ID：${e.capabilities.join(' · ')}`));
+  if (demo) activation.append(node('p', '以上为模拟员工记录，不代表 Runtime 生产事实。'));
+  wrap.append(activation);
+  return wrap;
 }
-function isWorkingWorker(e) { return e.availability === AVAILABILITY.WORKING; }
 function renderCard() {
   const e = selected(); if (!e) return;
-  $('card-heading').textContent = e.displayName;
+  $('card-heading').textContent = '员工身份';
   const body = $('card-body'), scroll = body.scrollTop;
   const focusText = $('card').contains(document.activeElement) ? document.activeElement?.textContent : null;
   const activityScroll = body.querySelector('.fc-mini-log')?.scrollTop ?? 0;
+  const activationOpen = body.querySelector('.fc-activation-details')?.open ?? false;
   const title = node('h2', e.displayName); title.id = 'card-title'; title.hidden = true;
   body.replaceChildren(title); $('card-footer').replaceChildren();
   if (!connected()) body.append(notice('Runtime 暂不可用：以下是最后已知投影，写操作与动画已停止。'));
-  if (page === 'overview') body.append(overview(e));
+  if (page === 'overview') body.append(overview(e, activationOpen));
   else {
-    const titles = { settings: demo ? 'Agent 设置（模拟）' : '员工控制', details: '工作详情', logs: '公开活动历史', assign: '分配任务（模拟）' };
+    const titles = { settings: demo ? 'Agent 设置（模拟）' : '员工控制', details: '近期交付与当前尝试', logs: '公开活动历史', assign: '分配任务（模拟）' };
     const head = node('div', undefined, 'fc-subtitle'); head.append(button('← 返回', () => navigate('overview')), node('h2', titles[page])); body.append(head);
     if (page === 'settings') body.append(settings(e));
     if (page === 'details') body.append(details(e));
@@ -275,7 +543,7 @@ function renderCard() {
   if (page === 'overview') {
     const work = e.currentWork;
     if (!demo && work) $('card-footer').append(button('查看工作线', () => openLineage(work.workId)));
-    $('card-footer').append(button('查看详情', () => navigate('details')));
+    $('card-footer').append(button('近期交付', () => navigate('details')));
     if (!demo) $('card-footer').append(button('员工控制', () => navigate('settings')));
     $('card-footer').append(button('公开活动', () => navigate('logs')));
     if (demo) {
@@ -297,7 +565,6 @@ function details(e) {
     current.append(node('p', e.execution ? `执行后端：${e.execution.backendType} · ${e.execution.backendVersion}` : '执行后端未提供'));
     if (!demo) current.append(button('查看工作线 →', () => openLineage(work.workId)));
   } else current.append(node('p', '当前没有执行中的尝试。'));
-  section.append(current);
   const deliveries = block('近期交付');
   const items = detail.recentDeliveries ?? [];
   if (!items.length) deliveries.append(node('p', '尚无交付记录。'));
@@ -309,6 +576,7 @@ function details(e) {
     deliveries.append(line);
   }
   section.append(deliveries);
+  section.append(current);
   return section;
 }
 function logs(e) {
@@ -419,10 +687,10 @@ $('avatar-file').onchange = async () => { const file = $('avatar-file').files[0]
   try { await validatePortrait(file); } catch (error) { avatarGeneration++; $('avatar-error').textContent = `${error.message}；原肖像未改变。`; return; }
   const url = URL.createObjectURL(file); try { await setImage(url); } finally { URL.revokeObjectURL(url); }
 };
-$('save-portrait').onclick = () => { if (!imageDraft) return; try { const result = $('crop').toDataURL('image/png'); portraits.set(`${currentCompany}/${selectedId}`, result); avatarDirty = false; closeDialog('avatar'); renderCard(); renderRoster(); toast('已应用本页本地肖像预览；未上传服务器'); } catch { toast('裁剪失败，原肖像未改变'); } };
-async function selectCompany(id) { if (!await discard()) { $('company').value = currentCompany; return; } stop(); dirty = false; for (const dialog of ['avatar','lineage','card','roster']) if ($(dialog).open) await closeDialog(dialog, true); currentCompany = id; selectedId = undefined; cardDetail = null; store.replace({ companyId: id, source: demo ? 'mock' : 'live', capturedAt: null, summary: { employees: 0, working: 0, available: 0, disabled: 0 }, employees: [] }); initialized = false; stop = adapter.subscribe(id, store); }
+$('save-portrait').onclick = () => { if (!imageDraft) return; try { const result = $('crop').toDataURL('image/png'); portraits.set(`${currentCompany}/${selectedId}`, result); avatarDirty = false; closeDialog('avatar'); renderCard(); renderRoster(); $('workforce-list').dataset.signature = ''; renderWorkforce(); toast('已应用本页本地肖像预览；未上传服务器'); } catch { toast('裁剪失败，原肖像未改变'); } };
+async function selectCompany(id) { if (!await discard()) { $('company').value = currentCompany; return; } stop(); dirty = false; for (const dialog of ['avatar','lineage','card','roster']) if ($(dialog).open) await closeDialog(dialog, true, false); returnView.card = returnView.avatar = returnView.lineage = null; currentCompany = id; selectedId = undefined; cardDetail = null; store.replace({ companyId: id, source: demo ? 'mock' : 'live', capturedAt: null, summary: { employees: 0, working: 0, available: 0, disabled: 0 }, employees: [] }); initialized = false; stop = adapter.subscribe(id, store); }
 $('company').onchange = () => selectCompany($('company').value);
-$('demo-controls').hidden = !demo; $('mode-link').href = demo ? '/employees' : '/employees?demo=1'; $('mode-link').textContent = demo ? '返回真实 Runtime ↗' : '查看模拟演示 ↗';
+$('demo-controls').hidden = !demo; $('mode-link').hidden = !demo; $('mode-link').href = demo ? embedded ? '/employees?embedded=1' : '/employees' : embedded ? '/employees?demo=1&embedded=1' : '/employees?demo=1'; $('mode-link').textContent = demo ? '返回真实公司 ↗' : '查看模拟演示 ↗';
 if (demo) {
   $('demo-add').onclick = () => adapter.add();
   $('demo-work').onclick = () => adapter.collaborate();
@@ -437,10 +705,12 @@ async function boot() {
   try {
     const companies = await adapter.companies();
     $('company').replaceChildren(...companies.map(c => { const o = node('option', c.name); o.value = c.id; return o; }));
+    $('company').disabled = companies.length === 0;
     $('retry-connection').hidden = companies.length > 0;
-    if (companies.length) await selectCompany(companies[0].id);
+    if (companies.length) await selectCompany(companies.find(c => c.id === requestedCompanyId)?.id ?? companies[0].id);
     else { $('company').append(node('option', '尚未创建公司')); store.replace({ companyId: null, source: demo ? 'mock' : 'live', capturedAt: null, summary: { employees: 0, working: 0, available: 0, disabled: 0 }, employees: [] }); $('connection').textContent = demo ? '模拟模式已就绪。' : '真实 Runtime 已连接，但尚无公司。请先完成团队的 Company 创建流程；也可查看明确标记的模拟演示。'; }
   } catch (error) { store.connection(CONNECTION.RUNTIME_UNAVAILABLE); $('retry-connection').hidden = false; toast(`连接失败：${error.message}`); }
   finally { $('retry-connection').disabled = false; }
 }
 $('retry-connection').onclick = boot; await boot();
+if (new URLSearchParams(location.search).get('search') === '1') void focusEmployeeSearch();

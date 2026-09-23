@@ -1,0 +1,20 @@
+body { margin: 0; background: #f5f6f8; color: #18243a; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+main { max-width: 560px; margin: 24px auto; padding: 0 28px; }
+.eyebrow { color: #60718b; font-size: 11px; font-weight: 700; letter-spacing: .14em; }
+h1 { font-size: 27px; margin: 8px 0 22px; }
+section { margin-bottom: 16px; background: white; border: 1px solid #dce2eb; border-radius: 14px; padding: 22px; box-shadow: 0 7px 24px #18243a0a; }
+.heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+h2 { margin: 0; font-size: 19px; }
+#status, #deepseek-status { color: #315fb3; font-size: 12px; font-weight: 600; }
+#status[data-state="INVALID"], #status[data-state="UNAVAILABLE"], #deepseek-status[data-state="INVALID"], #deepseek-status[data-state="UNAVAILABLE"] { color: #a83f3f; }
+p { color: #5b677a; line-height: 1.5; }
+label { display: block; font-weight: 600; margin: 18px 0 7px; }
+input { box-sizing: border-box; width: 100%; border: 1px solid #bfc9d7; border-radius: 8px; padding: 11px; font: inherit; }
+input:focus-visible, button:focus-visible { outline: 2px solid #315fb3; outline-offset: 2px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 17px; }
+button { border: 1px solid #aebbd0; border-radius: 8px; padding: 9px 13px; background: white; color: #18243a; font: inherit; cursor: pointer; }
+button:first-child { background: #315fb3; color: white; border-color: #315fb3; }
+button:disabled { opacity: .5; cursor: default; }
+#message, #deepseek-message { min-height: 20px; font-size: 12px; }
+
+.note {font-size: 12px; color: #60718b;}

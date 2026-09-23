@@ -477,7 +477,7 @@ test("a decision is durable: it survives closing and reopening the store", () =>
 
     const reopened = reopenKernel(dir);
     try {
-      assert.equal(reopened.status().schemaVersion, 7);
+      assert.equal(reopened.status().schemaVersion, 12);
       assert.equal(reopened.status().counts.founderDecisions, 1);
       assert.deepEqual(reopened.workProjection(flow.work.id), before);
       assert.deepEqual(

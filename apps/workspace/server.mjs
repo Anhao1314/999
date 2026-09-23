@@ -13,11 +13,12 @@ import { readFile } from 'node:fs/promises';
 import { isLocalBrowserRequest } from '../local-origin.mjs';
 
 const ROOT = new URL('./', import.meta.url);
-const ASSETS = new Set(['app.mjs', 'adapter.mjs', 'domain.mjs', 'styles.css']);
+const ASSETS = new Set(['company-hiring.mjs', 'company-hiring-domain.mjs', 'company-hiring.css', 'company-memory.mjs', 'company-memory-domain.mjs', 'company-memory.css', 'scene-preference.mjs', 'scene-background.mjs', 'scene-background.css', 'launch-mars.mp4', 'launch-earth.mp4', 'launch-intro.mp4', 'welcome.html', 'welcome.css', 'welcome.mjs', 'portal-geometry.mjs', 'app.mjs', 'adapter.mjs', 'domain.mjs', 'subpages.mjs', 'icons.mjs', 'placement.mjs', 'board-layout.mjs', 'company-stage.mjs', 'surface-motion.mjs', 'styles.css', 'stage.css', 'ui-tokens.css', 'alpine-wallpaper.png', 'flowcredit-brand.png']);
 const TYPES = {
   mjs: 'text/javascript; charset=utf-8',
   css: 'text/css; charset=utf-8',
   png: 'image/png',
+  mp4: 'video/mp4',
   html: 'text/html; charset=utf-8',
 };
 
@@ -49,18 +50,18 @@ export function createWorkspaceRoutes({ enabled = true } = {}) {
     }
     const file = url.pathname.startsWith('/workspace-assets/')
       ? url.pathname.slice('/workspace-assets/'.length)
-      : 'index.html';
+      : url.searchParams.get('launch') === '1' ? 'welcome.html' : 'index.html';
     if (file !== 'index.html' && !ASSETS.has(file)) {
       json(404, { error: { code: 'NOT_FOUND', message: '资源不存在' } });
       return true;
     }
-    const body = await readFile(new URL(file, ROOT));
+    const body = await readFile(new URL(['alpine-wallpaper.png', 'flowcredit-brand.png', 'launch-mars.mp4', 'launch-earth.mp4', 'launch-intro.mp4'].includes(file) ? `assets/${file}` : file, ROOT));
     response.writeHead(200, {
       'content-type': TYPES[file.split('.').at(-1)],
       'cache-control': 'no-cache',
       'x-content-type-options': 'nosniff',
       'content-security-policy':
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     });
     response.end(body);
     return true;

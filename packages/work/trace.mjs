@@ -14,8 +14,8 @@ export function newContinuationTraceId() {
   return `${CONTINUATION_TRACE_ID_PREFIX}${randomUUID()}`;
 }
 
-// `signals` and the sensor columns are reserved for a future Semantic Sensor;
-// every v0B4 row leaves them null, because this milestone integrates no sensor.
+// Historical v0B4 rows leave sensor columns null. Optional Relay Sense
+// backends append separate observation rows; they never edit an action row.
 export function newContinuationTrace({
   id = newContinuationTraceId(),
   companyId,

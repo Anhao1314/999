@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { kernelError } from "./errors.mjs";
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 12;
 export const STORE_FILE_NAME = "kernel.sqlite";
 
 // The v1 table set, kept verbatim: it is both the starting point of a fresh
@@ -348,6 +348,179 @@ CREATE TRIGGER IF NOT EXISTS founder_work_execution_bindings_no_delete BEFORE DE
   BEGIN SELECT RAISE(ABORT,'FOUNDER_WORK_EXECUTION_BINDING_IMMUTABLE'); END;
 `;
 
+// A bounded fan-in needs durable edges, not a second Swarm lifecycle. Edges
+// are immutable and point only between Tasks of the same Work (Kernel guard).
+const V8_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS task_dependencies(
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  prerequisite_task_id TEXT NOT NULL REFERENCES tasks(id),
+  PRIMARY KEY(task_id, prerequisite_task_id),
+  CHECK(task_id <> prerequisite_task_id)
+);
+CREATE INDEX IF NOT EXISTS task_dependencies_by_prerequisite
+  ON task_dependencies(prerequisite_task_id);
+CREATE TRIGGER IF NOT EXISTS task_dependencies_same_work BEFORE INSERT ON task_dependencies
+  WHEN (SELECT work_id FROM tasks WHERE id=NEW.task_id) <>
+       (SELECT work_id FROM tasks WHERE id=NEW.prerequisite_task_id)
+  BEGIN SELECT RAISE(ABORT,'TASK_DEPENDENCY_CROSS_WORK'); END;
+CREATE TRIGGER IF NOT EXISTS task_dependencies_no_update BEFORE UPDATE ON task_dependencies
+  BEGIN SELECT RAISE(ABORT,'TASK_DEPENDENCY_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS task_dependencies_no_delete BEFORE DELETE ON task_dependencies
+  BEGIN SELECT RAISE(ABORT,'TASK_DEPENDENCY_IMMUTABLE'); END;
+`;
+
+// Host-observed action receipts. One immutable row per completed tool request;
+// a source is attached only to a successful Host-minted read. No request or
+// response body, page content, credentials, or model conversation is stored.
+const V9_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS tool_action_receipts(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  worker_run_id TEXT NOT NULL REFERENCES worker_runs(id),
+  generation INTEGER NOT NULL CHECK(generation >= 0),
+  call_sequence INTEGER NOT NULL CHECK(call_sequence >= 1 AND call_sequence <= 33),
+  grant_digest TEXT NOT NULL,
+  skill_id TEXT NOT NULL,
+  skill_version TEXT NOT NULL,
+  capability TEXT,
+  status TEXT NOT NULL,
+  call_id_digest TEXT,
+  input_digest TEXT,
+  output_digest TEXT,
+  duration_ms REAL NOT NULL CHECK(duration_ms >= 0 AND duration_ms <= 120000),
+  source_id TEXT UNIQUE,
+  safe_origin TEXT,
+  canonical_url_digest TEXT,
+  content_digest TEXT,
+  source_observed_at TEXT,
+  recorded_at TEXT NOT NULL,
+  receipt_digest TEXT NOT NULL,
+  UNIQUE(worker_run_id,call_sequence),
+  CHECK(source_id IS NULL OR (status='SUCCEEDED' AND safe_origin IS NOT NULL
+    AND canonical_url_digest IS NOT NULL AND content_digest IS NOT NULL
+    AND source_observed_at IS NOT NULL)),
+  CHECK(source_id IS NOT NULL OR (safe_origin IS NULL AND canonical_url_digest IS NULL
+    AND content_digest IS NULL AND source_observed_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS tool_action_receipts_by_run
+  ON tool_action_receipts(worker_run_id,call_sequence);
+CREATE TRIGGER IF NOT EXISTS tool_action_receipts_no_update BEFORE UPDATE ON tool_action_receipts
+  BEGIN SELECT RAISE(ABORT,'TOOL_ACTION_RECEIPT_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS tool_action_receipts_no_delete BEFORE DELETE ON tool_action_receipts
+  BEGIN SELECT RAISE(ABORT,'TOOL_ACTION_RECEIPT_IMMUTABLE'); END;
+`;
+
+// The prior execution provenance and Evolution slice owns v10. Preserve that
+// exact additive schema even when this Hiring composition does not use its
+// higher-level candidate APIs. A prior v10 database must remain readable.
+const V10_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS evolution_candidates(
+ id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
+ evidence_digest TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+ UNIQUE(company_id,evidence_digest)
+);
+CREATE TABLE IF NOT EXISTS evolution_records(
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+ company_id TEXT NOT NULL REFERENCES companies(id),
+ candidate_id TEXT NOT NULL REFERENCES evolution_candidates(id),
+ kind TEXT NOT NULL CHECK(kind IN ('EVALUATION','TRIAL_AUTHORIZED','PROMOTED','REJECTED','ROLLED_BACK')),
+ payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evolution_records_company ON evolution_records(company_id,sequence);
+CREATE TRIGGER IF NOT EXISTS evolution_records_company_guard BEFORE INSERT ON evolution_records
+ WHEN (SELECT company_id FROM evolution_candidates WHERE id=NEW.candidate_id) <> NEW.company_id
+ BEGIN SELECT RAISE(ABORT,'EVOLUTION_CROSS_COMPANY'); END;
+CREATE TRIGGER IF NOT EXISTS evolution_candidates_no_update BEFORE UPDATE ON evolution_candidates
+ BEGIN SELECT RAISE(ABORT,'EVOLUTION_APPEND_ONLY'); END;
+CREATE TRIGGER IF NOT EXISTS evolution_candidates_no_delete BEFORE DELETE ON evolution_candidates
+ BEGIN SELECT RAISE(ABORT,'EVOLUTION_APPEND_ONLY'); END;
+CREATE TRIGGER IF NOT EXISTS evolution_records_no_update BEFORE UPDATE ON evolution_records
+ BEGIN SELECT RAISE(ABORT,'EVOLUTION_APPEND_ONLY'); END;
+CREATE TRIGGER IF NOT EXISTS evolution_records_no_delete BEFORE DELETE ON evolution_records
+ BEGIN SELECT RAISE(ABORT,'EVOLUTION_APPEND_ONLY'); END;
+CREATE TABLE IF NOT EXISTS model_execution_receipts(
+ worker_run_id TEXT PRIMARY KEY REFERENCES worker_runs(id),
+ generation INTEGER NOT NULL,
+ backend_type TEXT NOT NULL,
+ backend_version TEXT NOT NULL,
+ skill_id TEXT NOT NULL,
+ skill_version TEXT NOT NULL,
+ successful_calls INTEGER NOT NULL CHECK(successful_calls BETWEEN 1 AND 32),
+ recorded_at TEXT NOT NULL,
+ receipt_digest TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS model_execution_receipts_no_update BEFORE UPDATE ON model_execution_receipts
+ BEGIN SELECT RAISE(ABORT,'MODEL_EXECUTION_RECEIPT_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS model_execution_receipts_no_delete BEFORE DELETE ON model_execution_receipts
+ BEGIN SELECT RAISE(ABORT,'MODEL_EXECUTION_RECEIPT_IMMUTABLE'); END;
+`;
+
+// Founder-created Employee lifecycle facts. Existing seeded and legacy
+// Employees have no row here: migration never invents a trial or a hire.
+const V11_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS employee_hiring_events(
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  employee_id TEXT NOT NULL REFERENCES employees(id),
+  kind TEXT NOT NULL CHECK(kind IN ('DRAFT_CREATED','TRIAL_STARTED','HIRE_CONFIRMED','DISABLED','ENABLED')),
+  detail TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS employee_hiring_events_by_employee
+  ON employee_hiring_events(employee_id,sequence);
+CREATE TRIGGER IF NOT EXISTS employee_hiring_events_no_update BEFORE UPDATE ON employee_hiring_events
+  BEGIN SELECT RAISE(ABORT,'HIRING_EVENT_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS employee_hiring_events_no_delete BEFORE DELETE ON employee_hiring_events
+  BEGIN SELECT RAISE(ABORT,'HIRING_EVENT_IMMUTABLE'); END;
+`;
+
+// Product command replay receipts are not a second Hiring state machine.
+// Hiring events and ordinary Work facts remain authoritative; this table
+// binds one Founder requestId to its bounded result in the same transaction.
+const V12_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS founder_hiring_command_receipts(
+  request_id TEXT PRIMARY KEY,
+  company_id TEXT NOT NULL REFERENCES companies(id),
+  employee_id TEXT NOT NULL REFERENCES employees(id),
+  command TEXT NOT NULL CHECK(command IN
+    ('CreateEmployeeDraft','StartEmployeeTrial','ConfirmEmployeeHire','DisableEmployee')),
+  input_digest TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS founder_hiring_command_receipts_by_employee
+  ON founder_hiring_command_receipts(employee_id,created_at);
+CREATE TRIGGER IF NOT EXISTS founder_hiring_command_receipts_no_update
+  BEFORE UPDATE ON founder_hiring_command_receipts
+  BEGIN SELECT RAISE(ABORT,'HIRING_COMMAND_RECEIPT_IMMUTABLE'); END;
+CREATE TRIGGER IF NOT EXISTS founder_hiring_command_receipts_no_delete
+  BEFORE DELETE ON founder_hiring_command_receipts
+  BEGIN SELECT RAISE(ABORT,'HIRING_COMMAND_RECEIPT_IMMUTABLE'); END;
+`;
+
+const rowToToolActionReceipt = (row) => row && ({
+  sequence: row.sequence,
+  workerRunId: row.worker_run_id,
+  generation: row.generation,
+  callSequence: row.call_sequence,
+  grantDigest: row.grant_digest,
+  skillId: row.skill_id,
+  skillVersion: row.skill_version,
+  capability: row.capability,
+  status: row.status,
+  callIdDigest: row.call_id_digest,
+  inputDigest: row.input_digest,
+  outputDigest: row.output_digest,
+  durationMs: row.duration_ms,
+  sourceId: row.source_id,
+  safeOrigin: row.safe_origin,
+  canonicalUrlDigest: row.canonical_url_digest,
+  contentDigest: row.content_digest,
+  sourceObservedAt: row.source_observed_at,
+  recordedAt: row.recorded_at,
+  receiptDigest: row.receipt_digest,
+  actuatorKind: row.actuator_kind ?? null,
+});
+
 const rowToFounderWorkExecutionBinding = (row) => row && ({
   workId: row.work_id,
   requestId: row.request_id,
@@ -614,6 +787,16 @@ export class KernelStore {
       this.transaction(() => this.#migrateV5ToV6());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 6)
       this.transaction(() => this.#migrateV6ToV7());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 7)
+      this.transaction(() => this.#migrateV7ToV8());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 8)
+      this.transaction(() => this.#migrateV8ToV9());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 9)
+      this.transaction(() => this.#migrateV9ToV10());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 10)
+      this.transaction(() => this.#migrateV10ToV11());
+    if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === 11)
+      this.transaction(() => this.#migrateV11ToV12());
     if (this.db.prepare("SELECT version FROM schema_meta").get()?.version === SCHEMA_VERSION)
       return;
     throw kernelError(
@@ -692,6 +875,34 @@ export class KernelStore {
   #migrateV6ToV7() {
     this.db.exec(V7_TABLES_SQL + V7_TRIGGERS_SQL);
     this.db.prepare("UPDATE schema_meta SET version=?").run(7);
+  }
+
+  #migrateV7ToV8() {
+    this.db.exec(V8_TABLES_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(8);
+  }
+
+  #migrateV8ToV9() {
+    this.db.exec(V9_TABLES_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(9);
+  }
+
+  #migrateV9ToV10() {
+    this.db.exec(V10_TABLES_SQL);
+    if (!this.db.prepare("PRAGMA table_info(tool_action_receipts)").all()
+      .some(column => column.name === "actuator_kind"))
+      this.db.exec("ALTER TABLE tool_action_receipts ADD COLUMN actuator_kind TEXT");
+    this.db.prepare("UPDATE schema_meta SET version=?").run(10);
+  }
+
+  #migrateV10ToV11() {
+    this.db.exec(V11_TABLES_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(11);
+  }
+
+  #migrateV11ToV12() {
+    this.db.exec(V12_TABLES_SQL);
+    this.db.prepare("UPDATE schema_meta SET version=?").run(12);
   }
 
   get schemaVersion() {
@@ -817,6 +1028,22 @@ export class KernelStore {
       .prepare("SELECT * FROM tasks WHERE state=? ORDER BY created_at, id")
       .all(state)
       .map(rowToTask);
+  }
+
+  insertTaskDependency(taskId, prerequisiteTaskId) {
+    this.db.prepare("INSERT INTO task_dependencies(task_id,prerequisite_task_id) VALUES(?,?)")
+      .run(taskId, prerequisiteTaskId);
+  }
+
+  taskDependencies(taskId) {
+    return this.db.prepare("SELECT prerequisite_task_id FROM task_dependencies WHERE task_id=? ORDER BY prerequisite_task_id")
+      .all(taskId).map((row) => row.prerequisite_task_id);
+  }
+
+  workDependencies(workId) {
+    return this.db.prepare(`SELECT d.task_id,d.prerequisite_task_id FROM task_dependencies d
+      JOIN tasks t ON t.id=d.task_id WHERE t.work_id=? ORDER BY d.task_id,d.prerequisite_task_id`)
+      .all(workId).map((row) => ({ taskId: row.task_id, prerequisiteTaskId: row.prerequisite_task_id }));
   }
 
   // The only mutable row in the kernel. The monotonic-generation trigger makes
@@ -1058,6 +1285,40 @@ export class KernelStore {
       .run(enabled ? 1 : 0, id);
   }
 
+  appendEmployeeHiringEvent({ companyId, employeeId, kind, detail, createdAt }) {
+    const result = this.db.prepare(`INSERT INTO employee_hiring_events
+      (company_id,employee_id,kind,detail,created_at) VALUES(?,?,?,?,?)`)
+      .run(companyId, employeeId, kind, JSON.stringify(detail), createdAt);
+    return this.employeeHiringEvents(employeeId).find(row => row.sequence === Number(result.lastInsertRowid));
+  }
+
+  employeeHiringEvents(employeeId) {
+    return this.db.prepare(`SELECT * FROM employee_hiring_events WHERE employee_id=? ORDER BY sequence`)
+      .all(employeeId).map(row => ({ sequence: row.sequence, companyId: row.company_id,
+        employeeId: row.employee_id, kind: row.kind, detail: JSON.parse(row.detail), createdAt: row.created_at }));
+  }
+
+  companyHiringEvents(companyId) {
+    return this.db.prepare(`SELECT * FROM employee_hiring_events WHERE company_id=? ORDER BY sequence`)
+      .all(companyId).map(row => ({ sequence: row.sequence, companyId: row.company_id,
+        employeeId: row.employee_id, kind: row.kind, detail: JSON.parse(row.detail), createdAt: row.created_at }));
+  }
+
+  founderHiringCommandReceipt(requestId) {
+    const row = this.db.prepare("SELECT * FROM founder_hiring_command_receipts WHERE request_id=?").get(requestId);
+    return row ? { requestId: row.request_id, companyId: row.company_id,
+      employeeId: row.employee_id, command: row.command, inputDigest: row.input_digest,
+      result: JSON.parse(row.result_json), createdAt: row.created_at } : null;
+  }
+
+  insertFounderHiringCommandReceipt(receipt) {
+    this.db.prepare(`INSERT INTO founder_hiring_command_receipts
+      (request_id,company_id,employee_id,command,input_digest,result_json,created_at)
+      VALUES(?,?,?,?,?,?,?)`).run(receipt.requestId, receipt.companyId, receipt.employeeId,
+      receipt.command, receipt.inputDigest, JSON.stringify(receipt.result), receipt.createdAt);
+    return this.founderHiringCommandReceipt(receipt.requestId);
+  }
+
   // --- task requirements ----------------------------------------------------
   upsertTaskRequirements(requirements) {
     this.db
@@ -1164,6 +1425,66 @@ export class KernelStore {
       .prepare(`SELECT * FROM worker_runs${where} ORDER BY sequence`)
       .all(...values)
       .map(rowToWorkerRun);
+  }
+
+  insertToolActionReceipt(receipt) {
+    this.db.prepare(`INSERT INTO tool_action_receipts(
+      worker_run_id,generation,call_sequence,grant_digest,skill_id,skill_version,
+      capability,status,call_id_digest,input_digest,output_digest,duration_ms,
+      source_id,safe_origin,canonical_url_digest,content_digest,source_observed_at,
+      recorded_at,receipt_digest,actuator_kind)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      receipt.workerRunId, receipt.generation, receipt.callSequence,
+      receipt.grantDigest, receipt.skillId, receipt.skillVersion,
+      receipt.capability, receipt.status, receipt.callIdDigest,
+      receipt.inputDigest, receipt.outputDigest, receipt.durationMs,
+      receipt.sourceId, receipt.safeOrigin, receipt.canonicalUrlDigest,
+      receipt.contentDigest, receipt.sourceObservedAt, receipt.recordedAt,
+      receipt.receiptDigest, receipt.actuatorKind ?? null,
+    );
+    return this.getToolActionReceipt(receipt.workerRunId, receipt.callSequence);
+  }
+
+  getToolActionReceipt(workerRunId, callSequence) {
+    return rowToToolActionReceipt(this.db.prepare(
+      "SELECT * FROM tool_action_receipts WHERE worker_run_id=? AND call_sequence=?",
+    ).get(workerRunId, callSequence));
+  }
+
+  listToolActionReceipts({ workerRunId = null, workId = null } = {}) {
+    if (!workerRunId && !workId) throw new Error("tool receipt read requires a WorkerRun or Work");
+    const clauses = [];
+    const values = [];
+    if (workerRunId) { clauses.push("e.worker_run_id=?"); values.push(workerRunId); }
+    if (workId) { clauses.push("r.work_id=?"); values.push(workId); }
+    return this.db.prepare(`SELECT e.* FROM tool_action_receipts e
+      JOIN worker_runs r ON r.id=e.worker_run_id
+      WHERE ${clauses.join(" AND ")} ORDER BY e.sequence`).all(...values)
+      .map(rowToToolActionReceipt);
+  }
+
+  insertModelExecutionReceipt(receipt) {
+    this.db.prepare(`INSERT INTO model_execution_receipts
+      (worker_run_id,generation,backend_type,backend_version,skill_id,skill_version,successful_calls,recorded_at,receipt_digest)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(receipt.workerRunId, receipt.generation,
+      receipt.backendType, receipt.backendVersion, receipt.skillId, receipt.skillVersion,
+      receipt.successfulCalls, receipt.recordedAt, receipt.receiptDigest);
+    return this.modelExecutionReceipt(receipt.workerRunId);
+  }
+
+  modelExecutionReceipt(workerRunId) {
+    const row = this.db.prepare("SELECT * FROM model_execution_receipts WHERE worker_run_id=?").get(workerRunId);
+    return row ? { workerRunId: row.worker_run_id, generation: row.generation,
+      backendType: row.backend_type, backendVersion: row.backend_version,
+      skillId: row.skill_id, skillVersion: row.skill_version,
+      successfulCalls: row.successful_calls, recordedAt: row.recorded_at,
+      receiptDigest: row.receipt_digest } : null;
+  }
+
+  modelExecutionReceipts(workId) {
+    return this.db.prepare(`SELECT e.worker_run_id FROM model_execution_receipts e
+      JOIN worker_runs r ON r.id=e.worker_run_id WHERE r.work_id=? ORDER BY r.sequence`)
+      .all(workId).map(row => this.modelExecutionReceipt(row.worker_run_id));
   }
 
   updateWorkerRun(id, { state, endedAt, endReason }) {

@@ -175,6 +175,9 @@ const applications = await packager({
   prune: true,
   asar: true,
   extraResource: [RUNTIME_BUNDLE],
+  ...(process.env.FLOWCREDIT_ELECTRON_ZIP_DIR
+    ? { electronZipDir: process.env.FLOWCREDIT_ELECTRON_ZIP_DIR }
+    : {}),
   extendInfo: {
     CFBundleIconFile: ICON_RESOURCE_NAME,
     NSAppTransportSecurity: {

@@ -5,6 +5,25 @@ import { WorkKernel } from "./kernel.mjs";
 
 export { WORKER_INTERRUPTION_REASONS, WorkKernel } from "./kernel.mjs";
 export { createContinuationDriver, MAX_WAKE_ROUNDS } from "./driver.mjs";
+export {
+  RELAY_SENSE_STATE_VERSION,
+  RELAY_SENSE_QUESTION_PACK_VERSION,
+  RELAY_SENSE_QUESTIONS,
+  compileRelaySenseState,
+  relaySenseStateDigest,
+  parseRelaySenseAnswers,
+  validateRelaySenseSignals,
+} from "./relay-sense.mjs";
+export { createJevSenseBackend, JEV_SYSTEM_ONE_ENDPOINT } from "./jev-sense-backend.mjs";
+export { createMemorySecretProvider, createProcessSecretProvider, JEV_SECRET_NAME } from "./secret-provider.mjs";
+export {
+  createLayaShadowSensor,
+  compileLayaShadowState,
+  parseLayaShadowAnswers,
+  LAYA_SHADOW_SENSOR_NAME,
+  LAYA_SHADOW_SENSOR_VERSION,
+  LAYA_SHADOW_QUESTIONS,
+} from "./laya-shadow-sensor.mjs";
 export { KernelError, isKernelError } from "./errors.mjs";
 export { KernelStore, SCHEMA_VERSION, STORE_FILE_NAME } from "./store.mjs";
 export {

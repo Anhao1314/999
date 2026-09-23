@@ -1,19 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { syncSeats, EmployeeStore, cropRect, visualAction, needsFounderCheck, isWorking, currentRoleOf, CONNECTION, AVAILABILITY } from '../../apps/employee/domain.mjs';
+import { syncRooms, FLOOR_ROOMS, EmployeeStore, cropRect, visualAction, needsFounderCheck, isWorking, currentRoleOf, CONNECTION, AVAILABILITY } from '../../apps/employee/domain.mjs';
 import { validatePortrait } from '../../apps/employee/avatar.mjs';
 
 const people = (n) => Array.from({ length: n }, (_, i) => ({ employeeId: `e${String(i).padStart(3, '0')}`, availability: 'AVAILABLE', condition: null, currentWork: null }));
 const card = (over = {}) => ({ employeeId: 'e', availability: 'AVAILABLE', condition: null, currentWork: null, ...over });
 
-test('seating is presentation only: 7/20/60 employees expand and keep their seats', () => {
-  for (const n of [7, 20, 60]) {
-    const p = people(n), tables = syncSeats(p), ids = tables.flatMap((t) => t.seats).filter(Boolean);
+test('six presentation rooms distribute 0/1/7/20/60 employees without losing stable seats', () => {
+  for (const n of [0, 1, 7, 20, 60]) {
+    const p = people(n), rooms = syncRooms(p), ids = rooms.flatMap((room) => room.seats).filter(Boolean);
+    assert.deepEqual(rooms.map((room) => room.id), FLOOR_ROOMS.map((room) => room.id));
     assert.equal(new Set(ids).size, n);
-    assert.ok(tables.length >= Math.ceil(n / 6));
-    const after = syncSeats(p.slice(1), tables);
-    tables.forEach((t, i) => t.seats.forEach((id, j) => { if (id && id !== p[0].employeeId) assert.equal(after[i].seats[j], id); }));
-    assert.deepEqual(syncSeats([...p].reverse(), tables), tables);
+    assert.ok(Math.max(...rooms.map((room) => room.seats.filter(Boolean).length)) - Math.min(...rooms.map((room) => room.seats.filter(Boolean).length)) <= 1);
+    const after = syncRooms(p.slice(1), rooms);
+    rooms.forEach((room, i) => room.seats.forEach((id, j) => { if (id && id !== p[0]?.employeeId) assert.equal(after[i].seats[j], id); }));
+    assert.deepEqual(syncRooms([...p].reverse(), rooms), rooms);
   }
 });
 
@@ -22,6 +23,11 @@ test('a fresh projection replaces the read model; stale generations never overwr
   const model = { companyId: 'c', source: 'live', capturedAt: 't', summary: { employees: 1, working: 0, available: 1, disabled: 0 }, employees: people(1) };
   s.replace(model, 5);
   assert.equal(s.state.connection, CONNECTION.LIVE);
+  const firstSeat = s.state.rooms.find((room) => room.seats.includes('e000'))?.id;
+  s.replace({ ...model, employees: [...people(1), ...people(1).map((person) => ({ ...person, employeeId: 'e001' }))] }, 6);
+  assert.equal(s.state.rooms.find((room) => room.seats.includes('e000'))?.id, firstSeat, 'refresh keeps the same display room');
+  s.replace({ ...model, companyId: 'other', employees: [{ ...card(), employeeId: 'e001' }] }, 7);
+  assert.equal(s.state.rooms.find((room) => room.seats.includes('e001'))?.id, FLOOR_ROOMS[0].id, 'company switch resets display seating');
   assert.equal(s.replace({ ...model, employees: [] }, 4), false);
   assert.equal(s.state.employees.length, 1);
   s.connection(CONNECTION.RUNTIME_UNAVAILABLE);

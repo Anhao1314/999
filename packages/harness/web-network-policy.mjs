@@ -7,7 +7,7 @@ import { ToolSessionError } from "./tool-session.mjs";
 export const WEB_LIMITS = Object.freeze({
   redirects: 3,
   durationMs: 8_000,
-  responseBytes: 128 * 1024,
+  responseBytes: 512 * 1024,
   extractedTextBytes: 16 * 1024,
   headerBytes: 8 * 1024,
   searchResults: 5,

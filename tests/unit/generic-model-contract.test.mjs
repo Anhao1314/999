@@ -62,6 +62,21 @@ test("only a valid authorized dispatch spends execution budget; exhaustion never
   });
 });
 
+test("Host receipt callback identifies the Actuator that actually ran", async () => {
+  await withRun(async (run) => {
+    const selected = createFakeActuator({ responses: { [SEARCH]: { hits: ["selected"] } } });
+    const unused = createFakeActuator({ responses: { [SEARCH]: { hits: ["unused"] } } });
+    const grant = createToolGrant({ run, skill, approvedCapabilities: [SEARCH], actuators: [selected, unused] });
+    const observed = [];
+    const session = createAuthorizedToolSession({ run, grant, budget: createToolBudget({ maxToolCalls: 1 }),
+      actuators: [selected, unused], onReceipt: ({ receipt, actuator }) => observed.push({ receipt, actuator }) });
+    await session.invoke({ callId: "selected", capability: SEARCH, input: { query: "fixture" } });
+    assert.equal(observed[0].receipt.status, "SUCCEEDED");
+    assert.equal(observed[0].actuator, selected);
+    assert.equal(unused.calls.length, 0);
+  });
+});
+
 test("elapsed, input and output limits fail closed with bounded receipts", async () => {
   await withRun(async (run) => {
     const actuator = createFakeActuator({ responses: { [SEARCH]: { text: "x".repeat(70 * 1024) } } });

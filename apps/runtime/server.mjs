@@ -15,7 +15,8 @@
 //                           describe it. The host decides; the kernel never
 //                           drives itself, and `driveWork` stays available as
 //                           an explicit command either way.
-//   FLOWCREDIT_WORKER_BACKEND `off` (default) | `test-worker` | `codex-exec` —
+//   FLOWCREDIT_WORKER_BACKEND `off` (default) | `test-worker` | `codex-exec` |
+//                           `deepseek-hiring` (dedicated, real Hiring trials) —
 //                           which WorkerAdapter executes committed attempts.
 //                           `codex-exec` additionally needs FLOWCREDIT_CODEX_REPO
 //                           and reads FLOWCREDIT_CODEX_BASE_REVISION,
@@ -49,10 +50,11 @@
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { isKernelError } from "../../packages/runtime/errors.mjs";
-import { createContinuationDriver, openKernel } from "../../packages/runtime/index.mjs";
+import { createContinuationDriver, createJevSenseBackend, createProcessSecretProvider, openKernel } from "../../packages/runtime/index.mjs";
 import {
   DEFAULT_CODEX_COMMAND,
   createCodexExecAdapter,
+  createDeepSeekModelBackend,
   createStaticWorkerBackendResolver,
   createWorkerHost,
   discoverCodexVersion,
@@ -65,6 +67,8 @@ import {
   createFounderWorkCommand,
   resolveLocalExecutionContext,
 } from "../../packages/product/founder-work.mjs";
+import { createFounderHiringCommands } from "../../packages/product/founder-hiring.mjs";
+import { createHiringActivationResolver } from "../../packages/product/employee-hiring.mjs";
 import {
   projectEmployeeDetail,
   projectFounderWorkspace,
@@ -92,7 +96,7 @@ if (!COORDINATION_MODES.includes(COORDINATION)) {
 // NOT a model and NOT intelligence. `codex-exec` runs the production
 // CodexExecAdapter: one real local `codex exec` child per attempt, configured
 // entirely through FLOWCREDIT_CODEX_* (see docs/contracts/codex-exec-adapter-v1.md).
-const WORKER_BACKENDS = Object.freeze(["off", "test-worker", "codex-exec"]);
+const WORKER_BACKENDS = Object.freeze(["off", "test-worker", "codex-exec", "deepseek-hiring"]);
 const WORKER_BACKEND = process.env.FLOWCREDIT_WORKER_BACKEND ?? "off";
 if (!WORKER_BACKENDS.includes(WORKER_BACKEND)) {
   process.stderr.write(
@@ -105,6 +109,7 @@ const COMMANDS = Object.freeze({
   createCompany: (kernel, input) => kernel.createCompany(input),
   createWork: (kernel, input) => kernel.createWork(input),
   createTask: (kernel, input) => kernel.createTask(input),
+  createCapabilityResearchWork: (kernel, input) => kernel.createCapabilityResearchWork(input),
   startTask: (kernel, input) => kernel.startTask(input),
   checkpointTask: (kernel, input) => kernel.checkpointTask(input),
   recordArtifact: (kernel, input) => kernel.recordArtifact(input),
@@ -130,6 +135,16 @@ const COMMANDS = Object.freeze({
 });
 
 const kernel = openKernel({ dir: DIR });
+const processSecrets = createProcessSecretProvider();
+const hiringSecrets = WORKER_BACKEND === "deepseek-hiring" ? processSecrets : null;
+if (WORKER_BACKEND === "deepseek-hiring" &&
+    (COORDINATION !== "driver" || !hiringSecrets.has("model.deepseek") ||
+      kernel.founderWorkExecutionBindings().length > 0))
+  throw new Error("HIRING_EXECUTION_UNAVAILABLE: dedicated Hiring mode requires Driver, DeepSeek and no bound Founder Work");
+const hiringModelBackend = hiringSecrets
+  ? createDeepSeekModelBackend({ secretProvider: hiringSecrets }) : null;
+const senseBackends = process.env.FLOWCREDIT_RELAY_SENSE === "jev" && processSecrets.has("relay-sense.jev")
+  ? [createJevSenseBackend({ secretProvider: processSecrets })] : [];
 const productRepository = WORKER_BACKEND === "codex-exec"
   ? process.env.FLOWCREDIT_CODEX_REPO
   : process.env.FLOWCREDIT_PRODUCT_REPO;
@@ -144,7 +159,8 @@ const productContext = productRepository
 if (COORDINATION === "driver") {
   if (WORKER_BACKEND === "off" && kernel.founderWorkExecutionBindings().length > 0)
     throw new Error("PRODUCT_BACKEND_UNAVAILABLE: Founder Work cannot be driven without a Worker backend");
-  if (WORKER_BACKEND !== "off") assertBoundFounderWorks({ kernel, context: productContext });
+  if (WORKER_BACKEND !== "off" && WORKER_BACKEND !== "deepseek-hiring")
+    assertBoundFounderWorks({ kernel, context: productContext });
 }
 const createFounderWork = createFounderWorkCommand({
   kernel, context: productContext,
@@ -153,6 +169,12 @@ const createFounderWork = createFounderWorkCommand({
     revision: productRevision,
   }),
   coordination: COORDINATION, workerBackend: WORKER_BACKEND,
+});
+const founderHiringCommands = createFounderHiringCommands({
+  kernel,
+  // A command never creates a stranded trial when this process has no real
+  // Hiring Host. TestWorker and Codex are not presented as a DeepSeek trial.
+  trialExecutionReady: () => WORKER_BACKEND === "deepseek-hiring" && Boolean(hiringModelBackend),
 });
 const employeeRoutes = createEmployeeRoutes({ enabled: process.env.FLOWCREDIT_EMPLOYEE_UI !== "0" });
 // Both product shells are static file servers inside this process: the Lobby
@@ -163,7 +185,16 @@ const workspaceRoutes = createWorkspaceRoutes({ enabled: workspaceUiEnabled });
 // The host's choice, made once, visible in one place: whether this process lets
 // the Runtime coordinate itself. v0B4 adds no clock, queue or scheduler — only
 // this observer, and the deterministic NextActionProposer behind it.
-const driver = createContinuationDriver({ kernel, observe: COORDINATION === "driver" });
+const driver = createContinuationDriver({ kernel, observe: COORDINATION === "driver",
+  activationSkills: WORKER_BACKEND === "deepseek-hiring" ? ["CustomerInsight@v1"] : [],
+  senseBackends,
+  // The dedicated Hiring Host must not wake unrelated historical Works when
+  // the installed App upgrades an existing Company database.
+  eligibleWork: WORKER_BACKEND === "deepseek-hiring" ? (work) => {
+    try { return ["EmployeeCustomerResearchTrial.v0", "CapabilityCustomerResearch.v0"]
+      .includes(JSON.parse(work.intent).requestKind); }
+    catch { return false; }
+  } : null });
 
 // The WorkerHost executes attempts the Runtime started; it never coordinates.
 // It is bound into this process with the same honesty as the coordination
@@ -252,6 +283,10 @@ const workerHost =
       })
     : WORKER_BACKEND === "codex-exec"
       ? await buildCodexExecWorkerHost()
+      : WORKER_BACKEND === "deepseek-hiring"
+        ? createWorkerHost({ kernel, runtimeRoot: DIR,
+            activationResolver: createHiringActivationResolver({ kernel, modelBackend: hiringModelBackend }),
+            timeoutMs: 180_000 })
       : null;
 if (workerHost) workerHost.start();
 
@@ -340,7 +375,46 @@ async function handle(request, response) {
     return send(response, 200, {
       available: COORDINATION === "driver" && WORKER_BACKEND !== "off" && Boolean(productContext),
       contextId: productContext?.contextId ?? null,
+      ...(WORKER_BACKEND === "deepseek-hiring" ? { researchAvailable:
+        COORDINATION === "driver" && Boolean(hiringModelBackend) } : {}),
     });
+  }
+
+  if (request.method === "GET" && segments[0] === "product" && segments[1] === "companies" &&
+      segments[3] === "research-evidence" && segments.length === 4) {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
+    const companyId = segments[2];
+    if (!kernel.company(companyId)) return send(response, 404, { error: { code: "COMPANY_NOT_FOUND", message: "company does not exist" } });
+    const evidence = kernel.works(companyId).flatMap(work => {
+      const accepted = kernel.workProjection(work.id).outcome.accepted;
+      if (!accepted) return [];
+      const artifact = kernel.artifact(accepted.artifactId);
+      return artifact ? [{ artifactId: artifact.id, artifactDigest: artifact.contentDigest,
+        artifactTitle: artifact.title, workId: work.id, workTitle: work.title }] : [];
+    });
+    return send(response, 200, { evidence });
+  }
+
+  if (request.method === "GET" && segments[0] === "product" && segments[1] === "companies" &&
+      segments[3] === "hiring" && segments.length === 4) {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
+    const companyId = segments[2];
+    if (!kernel.company(companyId)) return send(response, 404, { error: { code: "COMPANY_NOT_FOUND", message: "company does not exist" } });
+    return send(response, 200, { hiring: kernel.employees(companyId).map(employee => kernel.employeeHiring(employee.id))
+      .filter(item => item.origin === "FOUNDER_DRAFT") });
+  }
+
+  if (request.method === "GET" && segments[0] === "product" && segments[1] === "artifacts" &&
+      segments.length === 4 && segments[3] === "body") {
+    if (!isLocalBrowserRequest(request))
+      return send(response, 403, { error: { code: "LOCAL_ORIGIN_REQUIRED", message: "same-origin loopback requests only" } });
+    const artifact = kernel.artifact(segments[2]);
+    if (!artifact) return send(response, 404, { error: { code: "ARTIFACT_NOT_FOUND", message: "Artifact does not exist" } });
+    return send(response, 200, { artifact: { artifactId: artifact.id, workId: artifact.workId,
+      title: artifact.title, kind: artifact.kind, content: artifact.content,
+      contentDigest: artifact.contentDigest, createdAt: artifact.createdAt } });
   }
 
   if (request.method === "POST" && url.pathname === "/product/commands") {
@@ -357,10 +431,43 @@ async function handle(request, response) {
     if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
         Object.keys(payload).some((key) => !["command", "input"].includes(key)))
       return send(response, 400, { error: { code: "INVALID_REQUEST", message: "invalid product command envelope" } });
-    if (payload.command !== "CreateFounderWork")
+    if (payload.command !== "CreateFounderWork" && payload.command !== "CreateCapabilityResearchWork" &&
+        payload.command !== "AcceptCapabilityResearchWork" &&
+        !Object.hasOwn(founderHiringCommands, payload.command))
       return send(response, 404, { error: { code: "PRODUCT_COMMAND_NOT_FOUND", message: "unknown product command" } });
     try {
-      return send(response, 200, { result: createFounderWork(payload.input) });
+      const result = payload.command === "CreateFounderWork"
+        ? createFounderWork(payload.input)
+        : payload.command === "AcceptCapabilityResearchWork"
+          ? (() => {
+              const input = payload.input;
+              if (!input || typeof input !== "object" || Array.isArray(input) ||
+                  Object.keys(input).sort().join(",") !== "artifactDigest,artifactId,basis,companyId,workId")
+                throw Object.assign(new Error("invalid Founder decision input"), { experience: true,
+                  code: "INVALID_REQUEST", status: 400 });
+              const work = kernel.work(input.workId);
+              let requestKind = null;
+              try { requestKind = JSON.parse(work?.intent ?? "{}").requestKind; } catch { /* invalid Work */ }
+              if (!work || work.companyId !== input.companyId || requestKind !== "CapabilityCustomerResearch.v0")
+                throw Object.assign(new Error("Work is outside this Founder decision path"), { experience: true,
+                  code: "DECISION_SCOPE_INVALID", status: 409 });
+              return kernel.acceptWork({ workId: input.workId, artifactId: input.artifactId,
+                artifactDigest: input.artifactDigest, basis: input.basis });
+            })()
+        : payload.command === "CreateCapabilityResearchWork"
+          ? (() => {
+              if (WORKER_BACKEND !== "deepseek-hiring" || COORDINATION !== "driver" || !hiringModelBackend)
+                throw Object.assign(new Error("Research execution is unavailable"), { experience: true,
+                  code: "RESEARCH_EXECUTION_UNAVAILABLE", status: 409 });
+              const input = payload.input;
+              if (!input || typeof input !== "object" || Array.isArray(input) ||
+                  Object.keys(input).some(key => !["companyId", "title", "instruction", "evidenceArtifactId"].includes(key)))
+                throw Object.assign(new Error("invalid research input"), { experience: true,
+                  code: "INVALID_REQUEST", status: 400 });
+              return kernel.createCapabilityResearchWork(input);
+            })()
+          : founderHiringCommands[payload.command](payload.input);
+      return send(response, 200, { result });
     } catch (error) {
       return sendError(response, error);
     }
@@ -431,6 +538,12 @@ async function handle(request, response) {
   )
     return send(response, 200, projectEmployeeDetail({ kernel, employeeId: segments[2] }));
 
+  // Additive, read-only Hiring truth for a future Founder interface. Legacy
+  // Employees explicitly report that no Founder trial history is known.
+  if (request.method === "GET" && segments[0] === "experience" &&
+      segments[1] === "employees" && segments[3] === "hiring" && segments.length === 4)
+    return send(response, 200, kernel.employeeHiring(segments[2]));
+
   if (
     request.method === "GET" &&
     segments[0] === "experience" &&
@@ -477,7 +590,12 @@ async function handle(request, response) {
       });
     }
     const handler = COMMANDS[payload?.command];
-    if (request.headers.origin && payload?.command !== "setEmployeeEnabled")
+    let founderManagedToggle = false;
+    if (request.headers.origin && payload?.command === "setEmployeeEnabled") {
+      try { founderManagedToggle = kernel.employeeHiring(payload?.input?.employeeId).origin === "FOUNDER_DRAFT"; }
+      catch { /* The legacy handler below reports malformed IDs. */ }
+    }
+    if (request.headers.origin && (payload?.command !== "setEmployeeEnabled" || founderManagedToggle))
       return send(response, 403, { error: { code: "PRODUCT_COMMAND_REQUIRED", message: "browser writes must use the product command API" } });
     if (!handler)
       return send(response, 404, {

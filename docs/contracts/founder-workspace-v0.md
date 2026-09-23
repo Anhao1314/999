@@ -1,12 +1,16 @@
 # Contract — Founder Workspace v0 (Experience-backed Product Shell)
 
-Status: **frozen semantics for the Founder Workspace v0C slice.** It freezes one
+Status: **historical frozen semantics for the Founder Workspace v0C slice.**
+The subsequent Founder Work product integration is recorded in
+`docs/contracts/founder-workspace-product-integration-v1.md`; its one bounded
+write supersedes this document's read-only UI boundary. This document freezes one
 idea and nothing more:
 
 > The Founder Workspace shows the company, not the dashboard: Company reality
 > rendered from the Workforce Experience projections, never a second truth.
 
-Protocol additions: **none.** The Workspace reads Experience projections and is
+Protocol addition: the optional `founderAssistant` field in the existing
+Founder Workspace Experience projection. The Workspace reads Experience projections and is
 allowed no write at all. Not covered (later milestones): Canvas persistence,
 company-level Activity feed, Founder Work definition / Task planning, Founder
 Decision UI (executing ACCEPT), Hiring, Genesis, Knowledge admission, Laya,
@@ -34,11 +38,13 @@ Four rules decide every question below:
    derives no Company fact of its own. Between two polls the screen may be
    stale; Runtime is always right.
 2. **Canvas != Runtime truth.** The canvas is a visualization of durable facts:
-   nodes exist because Runtime facts exist. No drag, no reorder, no arrows that
-   run commands, no persisted x/y/width/height/zIndex.
-3. **UI state != Company truth.** Selection, Inspector, zoom, nav view and open
-   panels live in the browser's memory. They are never written to the Runtime
-   and never persisted.
+   nodes exist because Runtime facts exist. Attention, delivery and workforce
+   summary cards may be dragged or reordered for presentation only. A drag
+   never runs a command or changes a Work, Employee, Artifact or Founder
+   decision. No x/y/width/height/zIndex is persisted.
+3. **UI state != Company truth.** Selection, Inspector, zoom, nav view, open
+   panels and card positions live in the browser's memory. They are never
+   written to the Runtime and never persisted.
 4. **Transport is not Company state.** `RUNTIME_UNAVAILABLE` means the client
    could not read; it never changes an Employee's availability, a Work's status
    or a Delivery's accepted state. A failed read keeps the last known
@@ -49,7 +55,8 @@ Four rules decide every question below:
 Reads (all GET, all bounded, all derived per request):
 
 - `GET /experience/companies/:id/workspace` — the single source for company,
-  runtime status, attention, primary Work, workforce summary, recent deliveries
+  runtime status, attention, primary Work, workforce summary, optional Founder
+  assistant, recent deliveries
   and pulse. Polled on a fixed interval (v0: ~2 s) and replaced whole.
 - `GET /experience/employees/:id` — the Employee Inspector.
 - `GET /experience/works/:id/lineage` — the Work Inspector.
@@ -63,6 +70,13 @@ SSE/WebSocket in v0C. Loading the Workspace creates **no** Activity and no
 business row: every projection is a pure read.
 
 ## 3. Vocabulary
+
+`founderAssistant` is `null` unless an actual Employee's Position carries the
+`founder.assistant` capability. When present, identity, position and availability
+come from the same workforce derivation as the Employee Lobby. The homepage
+companion offers only read-only summaries and navigation to existing details;
+it cannot chat, decide, assign or perform commands. Its opening state is
+presentation only.
 
 The screen renders frozen Experience values through fixed product language:
 `AVAILABLE` / `WORKING` / `DISABLED` → 空闲 / 工作中 / 已停用; roles

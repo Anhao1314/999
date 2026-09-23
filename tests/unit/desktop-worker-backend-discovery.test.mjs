@@ -349,8 +349,12 @@ test("the discovered path configures the Runtime process and never the renderer"
     .map((name) => [name, readFileSync(join(ROOT, "apps/desktop/src", name), "utf8")]);
 
   for (const [, text] of texts)
-    for (const forbidden of ["ipcMain", "ipcRenderer", "contextBridge", "webContents.send", "executeJavaScript"])
+    for (const forbidden of ["ipcRenderer", "contextBridge", "webContents.send", "executeJavaScript"])
       assert.equal(text.includes(forbidden), false, `desktop main code must not expose ${forbidden}`);
+
+  const settingsMain = texts.find(([name]) => name === "main.mjs")?.[1] ?? "";
+  assert.match(settingsMain, /event\.sender === settingsWindow\.webContents/);
+  assert.match(settingsMain, /event\.senderFrame\?\.url === new URL\("\.\/settings\.html"/);
 
   const importers = texts
     .filter(([name]) => name !== "worker-backend-discovery.mjs")
@@ -359,7 +363,7 @@ test("the discovered path configures the Runtime process and never the renderer"
   assert.deepEqual(importers, ["main.mjs"], "discovery is main-process infrastructure, not a shared module");
 
   const main = texts.find(([name]) => name === "main.mjs")[1];
-  assert.match(main, /env: desktopRuntimeEnvironment\(\{ env: process\.env, discovery \}\)/);
+  assert.match(main, /desktopRuntimeEnvironment\(\{ env: process\.env, discovery: backendDiscovery \}\)/);
 
   // The two product shells the window can reach never learn the executable path.
   for (const file of [

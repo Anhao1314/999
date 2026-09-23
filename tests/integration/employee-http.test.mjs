@@ -26,7 +26,14 @@ test('employee lobby live mode: Experience reads, no manual scheduling, no direc
     // --- the static shell ---
     const page = await fetch(runtime.base + '/employees');
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /团队大厅/);
+    assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'self'/);
+    const employeePage = await page.text();
+    assert.match(employeePage, /公司平面图/);
+    assert.match(employeePage, /id="room-focus"/);
+    assert.match(employeePage, /class="fc-home-link" href="\/workspace">← 返回公司首页<\/a>/);
+    assert.equal((await fetch(runtime.base + '/workspace')).status, 200);
+    assert.equal((await fetch(runtime.base + '/employee-assets/ui-tokens.css')).status, 200);
+    assert.equal((await fetch(runtime.base + '/employee-assets/icons.mjs')).status, 200);
     assert.equal((await fetch(runtime.base + '/employee-assets/server.mjs')).status, 404);
     assert.equal((await fetch(runtime.base + '/employees', { headers: { origin: 'https://evil.invalid' } })).status, 403);
 

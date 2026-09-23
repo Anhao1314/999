@@ -14,7 +14,7 @@
     "package:desktop": "npm --prefix apps/desktop run package",
     "test:employees": "node --test tests/unit/employee-domain.test.mjs tests/unit/employee-adapter.test.mjs tests/unit/employee-lobby-source.test.mjs tests/integration/employee-http.test.mjs",
     "test:desktop": "node --test tests/unit/desktop-runtime-lifecycle.test.mjs tests/unit/desktop-shell-freeze.test.mjs",
-    "test:workspace": "node --test tests/unit/workspace-domain.test.mjs tests/unit/workspace-adapter.test.mjs tests/unit/workspace-source.test.mjs tests/integration/workspace-http.test.mjs",
+    "test:workspace": "node --test tests/unit/workspace-domain.test.mjs tests/unit/workspace-adapter.test.mjs tests/unit/workspace-placement.test.mjs tests/unit/workspace-board-layout.test.mjs tests/unit/workspace-subpages.test.mjs tests/unit/workspace-source.test.mjs tests/integration/workspace-http.test.mjs tests/integration/workspace-founder-work.test.mjs",
     "test": "node --test",
     "check": "node scripts/check.mjs"
   }

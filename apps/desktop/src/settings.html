@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模型与 Relay Sense 设置</title>
+<link rel="stylesheet" href="settings.css">
+<link rel="stylesheet" href="settings-scene.css">
+</head>
+<body>
+<div class="settings-scene" aria-hidden="true"><video id="settings-scene-video" src="settings-mars.mp4" muted loop playsinline preload="auto"></video></div>
+<button id="settings-scene-toggle" class="scene-toggle" type="button" aria-label="暂停背景动态" aria-pressed="false">Ⅱ</button>
+<main>
+  <p class="eyebrow">INTELLIGENCE / EXECUTION</p>
+  <h1>模型与 Relay Sense</h1>
+  <section aria-labelledby="deepseek-title">
+    <div class="heading"><h2 id="deepseek-title">DeepSeek Flash · 临时生成式模型</h2><span id="deepseek-status" role="status">正在检查…</span></div>
+    <p>模型用于已获派工的 WorkerRun。模型能生成交付和评审建议；Runtime 保留派工、工具授权与最终验收权。</p>
+    <p id="deepseek-configured-note" hidden>密钥已保存在本机加密存储中，窗口不会显示原文。</p>
+    <label for="deepseek-key">DeepSeek API Key</label>
+    <input id="deepseek-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入 DeepSeek API Key" maxlength="512">
+    <div class="actions">
+      <button id="deepseek-save" type="button">保存 / 替换</button>
+      <button id="deepseek-test" type="button">测试模型调用</button>
+      <button id="deepseek-remove" type="button">移除</button>
+    </div>
+    <p id="deepseek-message" role="status" aria-live="polite"></p>
+    <p class="note">测试会向 DeepSeek 发送一条短请求，可能产生少量 API 费用。密钥与响应不会写入公司事实。</p>
+  </section>
+  <section aria-labelledby="jev-title">
+    <div class="heading"><h2 id="jev-title">Jev</h2><span id="status" role="status">正在检查…</span></div>
+    <p>Jev 用于观察工作状态。最终决策仍由 Runtime 和 Founder 掌握。</p>
+    <p id="configured-note" hidden>已保存密钥：••••••••••••••••</p>
+    <label for="key">API Key</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="输入新的 Jev API Key" maxlength="512">
+    <div class="actions">
+      <button id="save" type="button">保存 / 替换</button>
+      <button id="test" type="button">测试连接</button>
+      <button id="remove" type="button">移除</button>
+    </div>
+    <p id="message" role="status" aria-live="polite"></p>
+  </section>
+</main>
+<script src="settings-ui.js"></script>
+<script src="settings-scene.js"></script>
+</body>
+</html>

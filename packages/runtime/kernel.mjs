@@ -23,6 +23,7 @@ import {
 import { deriveWorkAttention, sortAttentionItems } from "../work/attention.mjs";
 import { deriveOutcome } from "../work/outcome.mjs";
 import { WAKE_CAUSES, validateNextActionProposal } from "../work/continuation.mjs";
+import { validateBoundedSwarmProposal } from "../work/bounded-swarm.mjs";
 import { newContinuationTrace } from "../work/trace.mjs";
 import {
   FOUNDER_DECISION_DISPOSITIONS,
@@ -51,6 +52,9 @@ import {
 } from "./guards.mjs";
 import { KernelStore, SCHEMA_VERSION } from "./store.mjs";
 import { EVENTS } from "./events.mjs";
+import { ROUTED_CAPABILITY, ROUTING_POLICY_VERSION, routeCustomerResearch,
+  routingAssignmentReason, parseRoutingAssignmentReason, routingBasisDigest,
+  CAPABILITY_CONTRACT_VERSION } from "../workforce/capability-routing.mjs";
 import {
   AVAILABILITY,
   REVIEW_VERDICTS,
@@ -72,6 +76,17 @@ import {
 } from "../workforce/index.mjs";
 
 const INTERRUPTION_REASON = "PROCESS_INTERRUPTED";
+const TOOL_RECEIPT_STATUS = /^[A-Z][A-Z0-9_]{0,79}$/;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const SOURCE_ID = /^src_[0-9a-f-]{36}$/;
+const TOOL_CAPABILITY = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
+const HIRING_CAPABILITIES = new Set(["customer.research", "evidence.analysis"]);
+const HIRING_SKILLS = new Set(["CustomerInsight@v1", "EvidenceSynthesis@v1"]);
+const FOUNDER_HIRING_COMMANDS = new Set(["CreateEmployeeDraft", "StartEmployeeTrial",
+  "ConfirmEmployeeHire", "DisableEmployee"]);
+const EMPLOYEE_TRIAL_KIND = "EmployeeCustomerResearchTrial.v0";
+const EMPLOYEE_FOLLOWUP_KIND = "EmployeeEvidenceSynthesis.v0";
+const CUSTOMER_RESEARCH_WORK_KIND = "CapabilityCustomerResearch.v0";
 
 // The frozen v0 vocabulary of external Worker-host interruption reasons. These
 // describe execution failure — never Founder authority, cancellation, a verdict
@@ -238,9 +253,14 @@ export class WorkKernel {
   setEmployeeEnabled({ employeeId, enabled } = {}) {
     const employee = this.#requireEmployee(employeeId);
     const next = assertEnabled(enabled, "enabled");
+    const hiring = this.store.employeeHiringEvents(employee.id);
+    if (next && hiring.length && !hiring.some(event => event.kind === "HIRE_CONFIRMED"))
+      throw kernelError("HIRING_NOT_CONFIRMED", "a draft Employee cannot be enabled before Founder confirmation");
     if (employee.enabled === next) return this.employee(employee.id);
     this.#mutate(() => {
       this.store.updateEmployeeEnabled(employee.id, next);
+      if (hiring.length) this.store.appendEmployeeHiringEvent({ companyId: employee.companyId,
+        employeeId: employee.id, kind: next ? "ENABLED" : "DISABLED", detail: {}, createdAt: this.now() });
       this.#event({
         companyId: employee.companyId,
         kind: "EMPLOYEE_UPDATED",
@@ -255,6 +275,219 @@ export class WorkKernel {
       });
     });
     return this.employee(employee.id);
+  }
+
+  // Founder-owned creation. Position expectations and Employee identity are
+  // committed with one immutable draft declaration; no model or grant is stored.
+  createEmployeeDraft(input = {}) {
+    const allowed = ["companyId", "displayName", "positionTitle", "declaredCapabilities", "eligibleSkills",
+      "authorityProfile", "knowledgeScope", "reasoningProfile"];
+    if (!input || Array.isArray(input) || typeof input !== "object" ||
+        Object.keys(input).some(key => !allowed.includes(key)))
+      throw kernelError("INVALID_INPUT", "unexpected Employee draft field");
+    const companyId = assertId(input.companyId, "companyId");
+    if (!this.company(companyId)) throw kernelError("COMPANY_NOT_FOUND", "company does not exist");
+    const displayName = assertText(input.displayName, "displayName", BOUNDS.employeeNameMax);
+    const positionTitle = assertText(input.positionTitle, "positionTitle", BOUNDS.positionTitleMax);
+    assertNoSecret(displayName, "displayName");
+    assertNoSecret(positionTitle, "positionTitle");
+    const capabilities = assertCapabilityList(input.declaredCapabilities, "declaredCapabilities");
+    if (!capabilities.includes("customer.research") || capabilities.some(value => !HIRING_CAPABILITIES.has(value)))
+      throw kernelError("INVALID_INPUT", "V0 draft requires bounded customer research capabilities");
+    const skills = input.eligibleSkills;
+    if (!Array.isArray(skills) || skills.length < 1 || skills.length > 2 ||
+        new Set(skills).size !== skills.length || !skills.includes("CustomerInsight@v1") ||
+        skills.some(value => !HIRING_SKILLS.has(value)) ||
+        (skills.includes("EvidenceSynthesis@v1") && !capabilities.includes("evidence.analysis")))
+      throw kernelError("INVALID_INPUT", "unsupported eligible Skill selection");
+    if (input.authorityProfile !== "PUBLIC_WEB_READ_ONLY" || input.knowledgeScope !== "NONE" ||
+        input.reasoningProfile !== "STANDARD")
+      throw kernelError("INVALID_INPUT", "unsupported V0 authority, knowledge or reasoning profile");
+    let created;
+    this.#mutate(() => {
+      const position = this.createPosition({ companyId, title: positionTitle, capabilities });
+      const employee = this.createEmployee({ companyId, positionId: position.id, displayName, enabled: false });
+      const event = this.store.appendEmployeeHiringEvent({ companyId, employeeId: employee.id,
+        kind: "DRAFT_CREATED", detail: { positionId: position.id, declaredCapabilities: capabilities,
+          eligibleSkills: skills, authorityProfile: input.authorityProfile,
+          knowledgeScope: input.knowledgeScope, reasoningProfile: input.reasoningProfile }, createdAt: this.now() });
+      created = { employee, position, basis: event.sequence };
+    });
+    return created;
+  }
+
+  #authorizedDraftTrial(employee, task) {
+    const events = this.store.employeeHiringEvents(employee.id);
+    if (!events.length || events.some(event => event.kind === "HIRE_CONFIRMED")) return false;
+    const trial = events.find(event => event.kind === "TRIAL_STARTED");
+    return trial?.detail.workId === task.workId && trial.detail.taskId === task.id &&
+      this.store.getWork(task.workId)?.companyId === employee.companyId;
+  }
+
+  // A trial is ordinary Work/Task/WorkerRun with one narrow exception: its
+  // disabled draft may execute only the Work bound in the Founder trial event.
+  startEmployeeTrial({ companyId, employeeId, publicUrl } = {}) {
+    const company = assertId(companyId, "companyId");
+    const employee = this.#requireEmployee(employeeId);
+    if (employee.companyId !== company) throw kernelError("CROSS_COMPANY_ASSIGNMENT", "Employee belongs to another company");
+    const events = this.store.employeeHiringEvents(employee.id);
+    if (events[0]?.kind !== "DRAFT_CREATED" || events.some(event => event.kind === "TRIAL_STARTED"))
+      throw kernelError("HIRING_TRIAL_UNAVAILABLE", "trial already started or Employee is not a draft");
+    const url = assertText(publicUrl, "publicUrl", 300);
+    assertNoSecret(url, "publicUrl");
+    let parsed;
+    try { parsed = new URL(url); } catch { throw kernelError("INVALID_INPUT", "invalid public trial URL"); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash || !parsed.hostname)
+      throw kernelError("INVALID_INPUT", "trial URL must be a public HTTPS page");
+    let started;
+    this.#mutate(() => {
+      const work = this.createWork({ companyId: company, title: `Customer research trial: ${employee.displayName}`,
+        intent: JSON.stringify({ requestKind: EMPLOYEE_TRIAL_KIND, employeeId: employee.id, publicUrl: parsed.href }) });
+      const task = this.createTask({ workId: work.id, title: "Bounded customer insight trial",
+        intent: "Read the approved public page. Separate observations from customer hypotheses and unknowns.",
+        requiredCapabilities: ["customer.research"] });
+      this.setTaskRequirements({ taskId: task.id, requiredCapabilities: ["customer.research"],
+        reviewCapabilities: ["work.review"] });
+      const event = this.store.appendEmployeeHiringEvent({ companyId: company, employeeId: employee.id,
+        kind: "TRIAL_STARTED", detail: { workId: work.id, taskId: task.id, publicUrl: parsed.href }, createdAt: this.now() });
+      this.assignTask({ taskId: task.id, employeeId: employee.id, reason: "founder.authorized-hiring-trial" });
+      const run = this.startWorkerRun({ taskId: task.id }).workerRun;
+      started = { work, task, workerRun: run, basis: event.sequence };
+    });
+    return started;
+  }
+
+  employeeHiring(employeeId) {
+    const employee = this.#requireEmployee(employeeId);
+    const events = this.store.employeeHiringEvents(employee.id);
+    if (!events.length) return { employeeId: employee.id, companyId: employee.companyId,
+      origin: "LEGACY_OR_SEEDED", state: employee.enabled ? "ACTIVE" : "DISABLED", trial: null,
+      declaredCapabilities: null, capabilityEvidence: [] };
+    const draft = events[0].detail;
+    const trialEvent = events.find(event => event.kind === "TRIAL_STARTED");
+    const trialWorkId = trialEvent?.detail.workId ?? null;
+    const projection = trialWorkId ? this.workProjection(trialWorkId) : null;
+    const accepted = projection?.outcome.accepted ?? null;
+    const acceptedArtifact = accepted ? this.artifact(accepted.artifactId) : null;
+    const candidate = acceptedArtifact ?? (projection?.status === "READY_FOR_DECISION" &&
+      projection.outcome.candidateArtifacts.length === 1
+      ? this.artifact(projection.outcome.candidateArtifacts[0].id) : null);
+    const producerRun = candidate?.workerRunId
+      ? this.store.getWorkerRun(candidate.workerRunId) : null;
+    const reviewedArtifact = candidate?.taskId === trialEvent?.detail.taskId &&
+      producerRun?.employeeId === employee.id ? candidate : null;
+    const finalArtifact = acceptedArtifact?.id === reviewedArtifact?.id ? acceptedArtifact : null;
+    const review = reviewedArtifact ? this.reviews({ workId: trialWorkId }).find(item =>
+      item.verdict === "PASS" && item.targetArtifactId === reviewedArtifact.id &&
+      item.targetArtifactDigest === reviewedArtifact.contentDigest) : null;
+    const confirmed = events.find(event => event.kind === "HIRE_CONFIRMED") ?? null;
+    const state = confirmed ? (employee.enabled ? "ACTIVE" : "DISABLED") :
+      review && (accepted || projection?.status === "READY_FOR_DECISION")
+        ? "READY_FOR_FOUNDER_CONFIRMATION" :
+      projection?.status === "NEEDS_ATTENTION" ? "TRIAL_FAILED" :
+      trialEvent ? "TRIAL" : "DRAFT";
+    const capabilityEvidence = draft.declaredCapabilities.map(capability => ({ capability,
+      status: capability === "customer.research" && review && finalArtifact ? "TRIAL_VALIDATED" : "DECLARED",
+      ...(capability === "customer.research" && review && finalArtifact ? { workId: trialWorkId,
+        reviewId: review.id, artifactId: finalArtifact.id, artifactDigest: finalArtifact.contentDigest } : {}) }));
+    const history = this.workerRuns({ employeeId: employee.id });
+    return { employeeId: employee.id, companyId: employee.companyId, positionId: employee.positionId,
+      displayName: employee.displayName, origin: "FOUNDER_DRAFT", state, enabled: employee.enabled,
+      declaredCapabilities: draft.declaredCapabilities, eligibleSkills: draft.eligibleSkills,
+      authorityProfile: draft.authorityProfile, knowledgeScope: draft.knowledgeScope,
+      reasoningProfile: draft.reasoningProfile, capabilityEvidence,
+      trial: trialEvent ? { workId: trialWorkId, taskId: trialEvent.detail.taskId,
+        reviewedArtifactId: reviewedArtifact?.id ?? null,
+        reviewedArtifactDigest: reviewedArtifact?.contentDigest ?? null,
+        acceptedArtifactId: finalArtifact?.id ?? null, reviewId: review?.id ?? null } : null,
+      founderConfirmation: confirmed ? { eventSequence: confirmed.sequence,
+        reviewId: confirmed.detail.reviewId, artifactDigest: confirmed.detail.artifactDigest } : null,
+      workParticipationCount: history.length,
+      history: history.slice(-20).map(run => ({ workId: run.workId,
+        taskId: run.taskId, workerRunId: run.id, state: run.state })),
+      basis: events.at(-1).sequence };
+  }
+
+  confirmEmployeeHire({ companyId, employeeId, expectedBasis, reviewId, artifactDigest } = {}) {
+    const employee = this.#requireEmployee(employeeId);
+    if (employee.companyId !== assertId(companyId, "companyId"))
+      throw kernelError("CROSS_COMPANY_ASSIGNMENT", "Employee belongs to another company");
+    const hiring = this.employeeHiring(employee.id);
+    if (hiring.origin !== "FOUNDER_DRAFT" || hiring.state !== "READY_FOR_FOUNDER_CONFIRMATION" ||
+        !hiring.trial.acceptedArtifactId)
+      throw kernelError("HIRING_NOT_READY", "accepted independently reviewed trial is required");
+    if (assertInteger(expectedBasis, "expectedBasis") !== hiring.basis ||
+        hiring.trial.reviewId !== reviewId ||
+        this.artifact(hiring.trial.acceptedArtifactId)?.contentDigest !== artifactDigest)
+      throw kernelError("HIRING_STALE_BASIS", "trial evidence or confirmation basis changed");
+    let confirmation;
+    this.#mutate(() => {
+      confirmation = this.store.appendEmployeeHiringEvent({ companyId: employee.companyId,
+        employeeId: employee.id, kind: "HIRE_CONFIRMED",
+        detail: { trialWorkId: hiring.trial.workId, reviewId, artifactId: hiring.trial.acceptedArtifactId,
+          artifactDigest }, createdAt: this.now() });
+      this.setEmployeeEnabled({ employeeId: employee.id, enabled: true });
+    });
+    return { employee: this.employee(employee.id), hiring: this.employeeHiring(employee.id), confirmation };
+  }
+
+  startConfirmedEmployeeWork({ companyId, employeeId, instruction } = {}) {
+    const employee = this.#requireEmployee(employeeId);
+    if (employee.companyId !== assertId(companyId, "companyId"))
+      throw kernelError("CROSS_COMPANY_ASSIGNMENT", "Employee belongs to another company");
+    const hiring = this.employeeHiring(employee.id);
+    if (hiring.state !== "ACTIVE" || !hiring.eligibleSkills.includes("EvidenceSynthesis@v1") ||
+        !hiring.declaredCapabilities.includes("evidence.analysis"))
+      throw kernelError("HIRING_NOT_CONFIRMED", "Employee is not eligible for this future Work");
+    const boundedInstruction = assertText(instruction, "instruction", 1000);
+    assertNoSecret(boundedInstruction, "instruction");
+    let started;
+    this.#mutate(() => {
+      const work = this.createWork({ companyId: employee.companyId,
+        title: `Evidence synthesis by ${employee.displayName}`,
+        intent: JSON.stringify({ requestKind: EMPLOYEE_FOLLOWUP_KIND, employeeId: employee.id,
+          instruction: boundedInstruction }) });
+      const task = this.createTask({ workId: work.id, title: "Bounded evidence synthesis",
+        intent: boundedInstruction, requiredCapabilities: ["evidence.analysis"] });
+      this.assignTask({ taskId: task.id, employeeId: employee.id, reason: "founder.selected-confirmed-employee" });
+      const run = this.startWorkerRun({ taskId: task.id }).workerRun;
+      started = { work, task, workerRun: run };
+    });
+    return started;
+  }
+
+  // Trusted Product code supplies a bounded operation; the browser never
+  // receives this callback seam. The replay receipt and the existing Hiring,
+  // Work, Review and Employee facts commit atomically under one Runtime write.
+  commitFounderHiringCommand({ requestId, companyId, command, inputDigest, perform } = {}) {
+    const request = assertRecordId(requestId, "requestId");
+    const company = assertId(companyId, "companyId");
+    if (!FOUNDER_HIRING_COMMANDS.has(command) || !SHA256_DIGEST.test(inputDigest ?? "") ||
+        typeof perform !== "function")
+      throw kernelError("HIRING_COMMAND_INVALID", "invalid Founder Hiring command");
+    const replay = () => {
+      const prior = this.store.founderHiringCommandReceipt(request);
+      if (!prior) return null;
+      if (prior.companyId !== company || prior.command !== command || prior.inputDigest !== inputDigest)
+        throw kernelError("HIRING_REQUEST_CONFLICT", "requestId already belongs to different Hiring intent");
+      return prior.result;
+    };
+    const prior = replay();
+    if (prior) return prior;
+    if (!this.store.getCompany(company)) throw kernelError("COMPANY_NOT_FOUND", "company does not exist");
+    return this.#mutate(() => {
+      const committed = replay();
+      if (committed) return committed;
+      const result = perform();
+      if (!result || typeof result !== "object" || Array.isArray(result) ||
+          result.command !== command || typeof result.employeeId !== "string" ||
+          this.store.getEmployee(result.employeeId)?.companyId !== company ||
+          Buffer.byteLength(JSON.stringify(result)) > 2048)
+        throw kernelError("HIRING_COMMAND_INVALID", "Hiring command returned an invalid bounded result");
+      this.store.insertFounderHiringCommandReceipt({ requestId: request, companyId: company,
+        employeeId: result.employeeId, command, inputDigest, result, createdAt: this.now() });
+      return result;
+    });
   }
 
   setTaskRequirements({ taskId, requiredCapabilities, reviewCapabilities } = {}) {
@@ -301,7 +534,7 @@ export class WorkKernel {
     return requirements;
   }
 
-  assignTask({ taskId, employeeId, reason } = {}) {
+  assignTask({ taskId, employeeId, reason, routingPolicyVersion } = {}) {
     const task = this.#requireTask(taskId);
     const employee = this.#requireEmployee(employeeId);
     const { companyId, workId } = this.#contextOfTask(task);
@@ -320,7 +553,7 @@ export class WorkKernel {
         "CROSS_COMPANY_ASSIGNMENT",
         `employee ${employee.id} and task ${task.id} belong to different companies`,
       );
-    if (!employee.enabled)
+    if (!employee.enabled && !this.#authorizedDraftTrial(employee, task))
       throw kernelError("EMPLOYEE_DISABLED", `employee ${employee.id} is disabled`);
     // A Review Task carries a hard independence rule (v0B4 §4): the reviewer
     // must not be the Employee who produced the exact Artifact under review.
@@ -344,12 +577,31 @@ export class WorkKernel {
         "TASK_REQUIREMENTS_UNSATISFIED",
         `position ${position.id} is missing [${missing.join(", ")}] required by task ${task.id}`,
       );
+    if (routingPolicyVersion === undefined && typeof reason === "string" && reason.startsWith("routing.v1:"))
+      throw kernelError("INVALID_ROUTING_POLICY", "routing Assignment reason is Runtime-owned");
+    let selectionBasis = null;
+    if (routingPolicyVersion !== undefined) {
+      if (routingPolicyVersion !== ROUTING_POLICY_VERSION ||
+          requirements?.requiredCapabilities?.length !== 1 ||
+          requirements.requiredCapabilities[0] !== ROUTED_CAPABILITY)
+        throw kernelError("INVALID_ROUTING_POLICY", "Task is outside the bounded routing contract");
+      const employees = this.employees(companyId);
+      const routed = routeCustomerResearch({ companyId, workId, taskId: task.id, employees,
+        positions: this.positions(companyId),
+        hiringByEmployeeId: new Map(employees.map(candidate =>
+          [candidate.id, this.employeeHiring(candidate.id)])),
+        activeEmployeeIds: employees.filter(candidate => candidate.availability === AVAILABILITY.BUSY)
+          .map(candidate => candidate.id), activationSkills: ["CustomerInsight@v1"] });
+      if (routed.selected?.employee.id !== employee.id)
+        throw kernelError("STALE_ROUTING_SELECTION", "selected Employee is no longer eligible or available");
+      selectionBasis = routed.basis;
+    }
     const assignment = newAssignment({
       companyId,
       taskId: task.id,
       employeeId: employee.id,
       positionId: position.id,
-      reason:
+      reason: selectionBasis ? routingAssignmentReason(selectionBasis) :
         reason === undefined || reason === null
           ? null
           : assertText(reason, "reason", BOUNDS.assignmentReasonMax, { min: 0 }),
@@ -372,6 +624,26 @@ export class WorkKernel {
       });
     });
     return assignment;
+  }
+
+  assignmentRoutingBasis(taskId) {
+    const assignment = this.assignment(taskId);
+    if (!assignment) return null;
+    const recorded = parseRoutingAssignmentReason(assignment.reason);
+    if (!recorded) return null;
+    const task = this.#requireTask(taskId);
+    const basis = { policyVersion: ROUTING_POLICY_VERSION,
+      contractVersion: CAPABILITY_CONTRACT_VERSION,
+      companyId: assignment.companyId, workId: task.workId, taskId: assignment.taskId,
+      employeeId: assignment.employeeId, positionId: assignment.positionId,
+      capability: recorded.capability, evidenceStatus: recorded.evidence,
+      evidenceArtifactDigest: recorded.artifactDigest, evidenceReviewId: recorded.reviewId,
+      skill: recorded.skill, eligibleEmployeeIds: recorded.candidateFacts.map(item => item[0]),
+      candidateFacts: recorded.candidateFacts };
+    if (routingBasisDigest(basis) !== recorded.digest) return null;
+    return { assignmentId: assignment.id, taskId: assignment.taskId,
+      employeeId: assignment.employeeId, positionId: assignment.positionId,
+      policyVersion: ROUTING_POLICY_VERSION, ...recorded };
   }
 
   createCompany({ name } = {}) {
@@ -413,6 +685,36 @@ export class WorkKernel {
       });
     });
     return work;
+  }
+
+  // One bounded Work composition: the Founder supplies an accepted evidence
+  // Artifact and an objective, never an Employee identity. The Driver routes
+  // its sole capability Task after this transaction commits.
+  createCapabilityResearchWork({ companyId, title, instruction, evidenceArtifactId } = {}) {
+    const company = assertId(companyId, "companyId");
+    if (!this.company(company)) throw kernelError("COMPANY_NOT_FOUND", "company does not exist");
+    const artifact = this.artifact(assertId(evidenceArtifactId, "evidenceArtifactId"));
+    const sourceWork = this.#requireWork(artifact.workId);
+    if (sourceWork.companyId !== company ||
+        this.workProjection(sourceWork.id).outcome.accepted?.artifactId !== artifact.id)
+      throw kernelError("EVIDENCE_NOT_ACCEPTED", "evidence Artifact must be accepted in this Company");
+    const goal = assertText(instruction, "instruction", 500);
+    assertNoSecret(goal, "instruction");
+    const evidenceExcerpt = artifact.content.slice(0, 1000);
+    const intent = JSON.stringify({ requestKind: CUSTOMER_RESEARCH_WORK_KIND,
+      instruction: goal, evidenceArtifactId: artifact.id,
+      evidenceArtifactDigest: artifact.contentDigest, evidenceExcerpt });
+    if (intent.length > BOUNDS.workIntentMax) throw kernelError("INVALID_INPUT", "bounded evidence is too large");
+    let result;
+    this.#mutate(() => {
+      const work = this.createWork({ companyId: company,
+        title: assertText(title, "title", BOUNDS.workTitleMax), intent });
+      const task = this.createTask({ workId: work.id, title: "Customer research from accepted evidence",
+        intent: `Use only the accepted Artifact embedded in the Work intent. ${goal} Deliver a bounded customer-research Artifact. State unknowns; do not invent new web observation.`,
+        requiredCapabilities: [ROUTED_CAPABILITY] });
+      result = { work, task };
+    });
+    return result;
   }
 
   // Product creation is one Kernel transaction: the Driver cannot observe an
@@ -582,6 +884,49 @@ export class WorkKernel {
     };
   }
 
+  // Atomic activation of the one bounded three-to-one collaboration shape.
+  // The proposer names work and edges by local index; Runtime mints identities.
+  materializeBoundedSwarm({ workId, expectedBasis, proposal } = {}) {
+    const work = this.#requireWork(workId);
+    const basis = assertInteger(expectedBasis, "expectedBasis", { min: 1 });
+    const validated = validateBoundedSwarmProposal(proposal);
+    if (!validated.ok) throw kernelError(validated.code, validated.message);
+    const now = this.now();
+    const tasks = proposal.tasks.map((entry) => newTask({
+      workId: work.id, title: entry.title, intent: entry.intent, createdAt: now,
+    }));
+    this.#mutate(() => {
+      if (this.store.founderDecisionForWork(work.id))
+        throw kernelError("WORK_ACCEPTED_LOCKED", "accepted Work cannot be activated");
+      if (this.store.listTasks(work.id).length > 0)
+        throw kernelError("WORK_ALREADY_ACTIVATED", "Work already has Tasks");
+      if (this.store.workActivityHead(work.id) !== basis)
+        throw kernelError("STALE_CONTINUATION_BASIS", "Work changed since the bounded plan was proposed");
+      for (let index = 0; index < tasks.length; index += 1) {
+        const task = tasks[index];
+        const entry = proposal.tasks[index];
+        this.store.insertTask(task);
+        this.#event({ companyId: work.companyId, workId: work.id, taskId: task.id,
+          kind: "task.created", detail: { title: task.title, taskKind: entry.taskKind,
+            materializedFrom: "bounded_swarm_proposal" } });
+        this.store.upsertTaskRequirements(this.#requirementsRecord(task.id,
+          entry.requiredCapabilities, entry.reviewCapabilities));
+        this.#event({ companyId: work.companyId, workId: work.id, taskId: task.id,
+          kind: EVENTS.TASK_REQUIREMENTS_SET,
+          detail: { requiredCapabilities: entry.requiredCapabilities,
+            reviewCapabilities: entry.reviewCapabilities } });
+      }
+      for (let index = 0; index < tasks.length; index += 1)
+        for (const dependency of proposal.tasks[index].dependsOn) {
+          this.store.insertTaskDependency(tasks[index].id, tasks[dependency].id);
+          this.#event({ companyId: work.companyId, workId: work.id, taskId: tasks[index].id,
+            kind: "TASK_DEPENDENCY_ADDED", detail: { prerequisiteTaskId: tasks[dependency].id } });
+        }
+    });
+    return { tasks: tasks.map((task) => this.task(task.id)),
+      work: this.workProjection(work.id), basis: this.store.workActivityHead(work.id) };
+  }
+
   // Observability only: appending a trace never changes business truth, and a
   // trace write can never fail a committed mutation (the Driver calls this
   // after COMMIT and treats its own failure as an observability failure).
@@ -602,6 +947,7 @@ export class WorkKernel {
         "INVALID_TRANSITION",
         `a ${task.state} task cannot start an execution attempt`,
       );
+    this.#compiledTaskInputs(task);
     const generation = task.generation + 1;
     this.#mutate(() => {
       this.store.updateTask(task.id, {
@@ -840,6 +1186,7 @@ export class WorkKernel {
         "INVALID_TRANSITION",
         `a ${task.state} task cannot start an execution attempt`,
       );
+    const inputArtifacts = this.#compiledTaskInputs(task);
     const assignment = this.store.currentAssignment(task.id);
     if (!assignment)
       throw kernelError(
@@ -856,7 +1203,7 @@ export class WorkKernel {
         `employee ${assignment.employeeId} produced the artifact review task ${task.id} judges; an Employee never reviews their own output`,
       );
     const employee = this.#requireEmployee(assignment.employeeId);
-    if (!employee.enabled)
+    if (!employee.enabled && !this.#authorizedDraftTrial(employee, task))
       throw kernelError("EMPLOYEE_DISABLED", `employee ${employee.id} is disabled`);
     const position = this.#requirePosition(employee.positionId);
     const requirements = this.store.getTaskRequirements(task.id);
@@ -883,6 +1230,7 @@ export class WorkKernel {
       position,
       latestCheckpoint: this.store.listCheckpoints(task.id).at(-1) ?? null,
       artifacts: this.store.listArtifacts({ taskId: task.id }),
+      inputArtifacts,
       review: this.#reviewSection(task, requirements),
       repair: this.#repairSection(task),
     });
@@ -1056,6 +1404,7 @@ export class WorkKernel {
         kind: artifact?.kind,
         title: artifact?.title,
         content: artifact?.content,
+        inputDigest: this.store.taskDependencies(task.id).length ? run.workPacketDigest : null,
         supersedesArtifactId: artifact?.supersedesArtifactId ?? null,
       });
       const requirements = this.store.getTaskRequirements(task.id);
@@ -1713,6 +2062,8 @@ export class WorkKernel {
         createdAt: now,
         updatedAt: now,
       });
+      for (const prerequisiteTaskId of this.store.taskDependencies(sourceTask.id))
+        this.store.insertTaskDependency(repairTask.id, prerequisiteTaskId);
       this.#event({
         companyId,
         workId,
@@ -2141,6 +2492,125 @@ export class WorkKernel {
     });
   }
 
+  // Host-observed execution evidence, recorded when a tool action finishes.
+  // This is deliberately separate from WorkerRun state and cannot grant a
+  // capability, admit an Artifact, or turn a web read into a verified fact.
+  recordHostToolReceipt({ workerRunId, generation, grantDigest, skillId,
+    skillVersion, receipt, source = null, actuatorKind = null } = {}) {
+    const id = assertId(workerRunId, "workerRunId");
+    const run = this.store.getWorkerRun(id);
+    if (!run) throw kernelError("WORKER_RUN_NOT_FOUND", `worker run ${id} does not exist`);
+    if (run.generation !== generation) throw kernelError("STALE_GENERATION", "tool receipt generation is stale");
+    if (run.state !== WORKER_RUN_STATES.RUNNING)
+      throw kernelError("INVALID_TRANSITION", "tool receipt requires a running WorkerRun");
+    const digest = (value, field, nullable = false) => {
+      if (nullable && value === null) return null;
+      if (typeof value !== "string" || !SHA256_DIGEST.test(value))
+        throw kernelError("INVALID_INPUT", `${field} must be a SHA-256 digest`);
+      return value;
+    };
+    const simple = (value, field) => {
+      if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value))
+        throw kernelError("INVALID_INPUT", `${field} is invalid`);
+      return value;
+    };
+    if (!receipt || !Number.isInteger(receipt.sequence) || receipt.sequence < 1 || receipt.sequence > 33 ||
+      (typeof receipt.status !== "string" || !TOOL_RECEIPT_STATUS.test(receipt.status)) ||
+      (receipt.capability !== null && (typeof receipt.capability !== "string" ||
+        receipt.capability.length > 80 || !TOOL_CAPABILITY.test(receipt.capability))) ||
+      typeof receipt.durationMs !== "number" || !Number.isFinite(receipt.durationMs) ||
+      receipt.durationMs < 0 || receipt.durationMs > 120_000)
+      throw kernelError("INVALID_INPUT", "tool receipt is not bounded");
+    if (source !== null && (receipt.status !== "SUCCEEDED" ||
+      receipt.sourceId !== source.sourceId || typeof source.sourceId !== "string" ||
+      !SOURCE_ID.test(source.sourceId) || typeof source.safeUrl !== "string" ||
+      source.safeUrl.length > 120 || !Number.isFinite(Date.parse(source.observedAt))))
+      throw kernelError("INVALID_INPUT", "source observation is invalid");
+    if (source === null && receipt.sourceId) throw kernelError("INVALID_INPUT", "source receipt has no observation");
+    if (actuatorKind !== null && (actuatorKind !== "NETWORK_WEB_READ" ||
+        receipt.status !== "SUCCEEDED" || receipt.capability !== "research.web.read" || source === null))
+      throw kernelError("INVALID_INPUT", "tool execution attestation is invalid");
+    if (source !== null) {
+      let origin;
+      try { origin = new URL(source.safeUrl); } catch { /* invalid source */ }
+      if (!origin || !["http:", "https:"].includes(origin.protocol) ||
+        origin.origin !== source.safeUrl || origin.username || origin.password)
+        throw kernelError("INVALID_INPUT", "source origin is unsafe");
+    }
+    const recordedAt = this.now();
+    const clean = {
+      workerRunId: id, generation, callSequence: receipt.sequence,
+      grantDigest: digest(grantDigest, "grantDigest"),
+      skillId: simple(skillId, "skillId"), skillVersion: simple(skillVersion, "skillVersion"),
+      capability: receipt.capability,
+      status: receipt.status,
+      callIdDigest: typeof receipt.callId === "string" ? digestOf(receipt.callId) : null,
+      inputDigest: digest(receipt.inputDigest, "inputDigest", true),
+      outputDigest: digest(receipt.outputDigest, "outputDigest", true),
+      durationMs: receipt.durationMs,
+      sourceId: source?.sourceId ?? null,
+      safeOrigin: source?.safeUrl ?? null,
+      canonicalUrlDigest: source ? digest(source.canonicalUrlDigest, "canonicalUrlDigest") : null,
+      contentDigest: source ? digest(source.contentDigest, "contentDigest") : null,
+      sourceObservedAt: source?.observedAt ?? null,
+      recordedAt,
+      actuatorKind,
+    };
+    clean.receiptDigest = digestOf(JSON.stringify(clean));
+    let stored;
+    this.#mutate(() => {
+      const current = this.store.getWorkerRun(id);
+      if (current.state !== WORKER_RUN_STATES.RUNNING || current.generation !== generation)
+        throw kernelError("STALE_GENERATION", "tool receipt lost its WorkerRun fence");
+      stored = this.store.insertToolActionReceipt(clean);
+    });
+    return stored;
+  }
+
+  toolActionReceipts({ workerRunId = null, workId = null } = {}) {
+    return this.store.listToolActionReceipts({
+      workerRunId: workerRunId ? assertId(workerRunId, "workerRunId") : null,
+      workId: workId ? assertId(workId, "workId") : null,
+    });
+  }
+
+  sourceObservations({ workerRunId = null, workId = null } = {}) {
+    return this.toolActionReceipts({ workerRunId, workId })
+      .filter(receipt => receipt.sourceId !== null)
+      .map(receipt => ({ sourceId: receipt.sourceId, workerRunId: receipt.workerRunId,
+        generation: receipt.generation, callSequence: receipt.callSequence,
+        safeOrigin: receipt.safeOrigin, canonicalUrlDigest: receipt.canonicalUrlDigest,
+        contentDigest: receipt.contentDigest, observedAt: receipt.sourceObservedAt,
+        receiptDigest: receipt.receiptDigest }));
+  }
+
+  recordHostModelExecution({ workerRunId, generation, backendType,
+    backendVersion, skillId, skillVersion, successfulCalls } = {}) {
+    const id = assertId(workerRunId, "workerRunId");
+    if (backendType !== "deepseek-chat-completions" ||
+        typeof backendVersion !== "string" || backendVersion.length > 80 ||
+        typeof skillId !== "string" || skillId.length < 1 || skillId.length > 80 ||
+        typeof skillVersion !== "string" || skillVersion.length < 1 || skillVersion.length > 80 ||
+        !Number.isInteger(successfulCalls) || successfulCalls < 1 || successfulCalls > 32)
+      throw kernelError("INVALID_INPUT", "model execution receipt is invalid");
+    const record = { workerRunId: id, generation, backendType, backendVersion, skillId, skillVersion,
+      successfulCalls, recordedAt: this.now() };
+    record.receiptDigest = digestOf(JSON.stringify(record));
+    return this.#mutate(() => {
+      const run = this.store.getWorkerRun(id);
+      const binding = this.store.getWorkerExecutionBindingByRun(id);
+      if (!run || run.state !== WORKER_RUN_STATES.RUNNING || run.generation !== generation ||
+          binding?.backendType !== "generic-model-worker" ||
+          binding.backendVersion !== `${backendType}@${backendVersion}`)
+        throw kernelError("STALE_GENERATION", "model execution receipt does not match the active bound attempt");
+      return this.store.insertModelExecutionReceipt(record);
+    });
+  }
+
+  modelExecutionReceipt(workerRunId) {
+    return this.store.modelExecutionReceipt(assertId(workerRunId, "workerRunId"));
+  }
+
   workerExecutionBinding(workerRunId) {
     return (
       this.store.getWorkerExecutionBindingByRun(assertId(workerRunId, "workerRunId")) ?? null
@@ -2316,6 +2786,7 @@ export class WorkKernel {
         unownedRevisionReviewIds: collaboration.unownedRevisionReviewIds,
         unfinishedRepairTaskIds: collaboration.unfinishedRepairTaskIds,
       },
+      taskDependencies: reads.dependencies,
       taskCounts,
       tasks: tasks.map((task) => ({
         id: task.id,
@@ -2324,6 +2795,9 @@ export class WorkKernel {
         generation: task.generation,
         updatedAt: task.updatedAt,
       })),
+      // Additive, read-only routing receipt. This describes why a past
+      // Assignment was made; it never drives a future one.
+      routingSelections: tasks.map(task => this.assignmentRoutingBasis(task.id)).filter(Boolean),
       attention: tasks
         .filter((task) => task.state === TASK_STATES.INTERRUPTED)
         .map((task) => ({
@@ -2418,6 +2892,7 @@ export class WorkKernel {
     const reviews = this.store.listReviews({ workId: work.id });
     const reviewRequests = this.store.listReviewRequests({ workId: work.id });
     const repairBindings = this.store.listRepairBindings({ workId: work.id });
+    const dependencies = this.store.workDependencies(work.id);
     const decision = this.store.founderDecisionForWork(work.id);
     const decisionBasis = this.store.workActivityHead(work.id);
     const requirementsByTask = new Map();
@@ -2453,13 +2928,15 @@ export class WorkKernel {
       repairBindings,
       artifacts,
     });
-    const outcome = deriveOutcome({ tasks, artifacts, decision });
+    const outcome = deriveOutcome({ tasks, artifacts, decision,
+      intermediateTaskIds: new Set(dependencies.map((edge) => edge.prerequisiteTaskId)) });
     const founderAttention = deriveWorkAttention({
       work,
       status: collaboration.status,
       tasks,
       reviewRequests,
       repairBindings,
+      dependencies,
       outcome,
       decision,
       employees: this.store.listEmployees(work.companyId),
@@ -2477,6 +2954,7 @@ export class WorkKernel {
       reviews,
       reviewRequests,
       repairBindings,
+      dependencies,
       decision,
       decisionBasis,
       collaboration,
@@ -2776,6 +3254,35 @@ export class WorkKernel {
     };
   }
 
+  // Compile only completed prerequisite outputs into a fresh attempt packet.
+  // The source Tasks and Artifacts remain immutable; no previous WorkerRun
+  // context, chat transcript or unrelated Work is inherited.
+  #compiledTaskInputs(task) {
+    const ids = this.store.taskDependencies(task.id);
+    if (ids.length > 3)
+      throw kernelError("TASK_PREREQUISITES_UNSATISFIED", "too many prerequisite Tasks");
+    return ids.map((id) => {
+      const source = this.store.getTask(id);
+      if (!source || source.workId !== task.workId || source.state !== TASK_STATES.COMPLETED)
+        throw kernelError("TASK_PREREQUISITES_UNSATISFIED", "a prerequisite Task is not complete");
+      const outputs = this.store.listArtifacts({ taskId: id })
+        .filter((artifact) => artifact.generation === source.generation);
+      if (outputs.length !== 1)
+        throw kernelError("TASK_PREREQUISITES_UNSATISFIED", "a prerequisite needs exactly one delivered Artifact");
+      const artifact = outputs[0];
+      const producer = artifact.workerRunId ? this.store.getWorkerRun(artifact.workerRunId) : null;
+      if (!producer || producer.taskId !== source.id || producer.state !== WORKER_RUN_STATES.COMPLETED)
+        throw kernelError("TASK_PREREQUISITES_UNSATISFIED", "a prerequisite Artifact needs a completed WorkerRun");
+      if (Buffer.byteLength(artifact.content) > 24 * 1024)
+        throw kernelError("TASK_INPUT_TOO_LARGE", "a prerequisite Artifact exceeds the compiled input bound");
+      return Object.freeze({
+        taskId: source.id, taskTitle: source.title,
+        artifactId: artifact.id, artifactDigest: artifact.contentDigest,
+        kind: artifact.kind, title: artifact.title, content: artifact.content,
+      });
+    });
+  }
+
   // What a reviewer is granted: the exact Artifact to judge, its recorded
   // digest, and the Task that produced it. Nothing else — no database dump, no
   // event log, no other Work, no prompt text.
@@ -2840,9 +3347,15 @@ export class WorkKernel {
         id: target.id,
         kind: target.kind,
         title: target.title,
+        content: target.content,
         contentDigest: target.contentDigest,
         generation: target.generation,
       },
+      observedSources: target.workerRunId
+        ? this.sourceObservations({ workerRunId: target.workerRunId }).slice(0, 32)
+          .map(source => ({ sourceId: source.sourceId, safeOrigin: source.safeOrigin,
+            contentDigest: source.contentDigest, observedAt: source.observedAt }))
+        : [],
       supersedesArtifactId: binding.targetArtifactId,
     };
   }

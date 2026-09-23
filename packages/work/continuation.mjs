@@ -17,8 +17,10 @@ import {
   satisfiesCapabilities,
 } from "../workforce/capabilities.mjs";
 import { deriveWorkforceDispatch } from "../workforce/dispatch.mjs";
+import { ROUTED_CAPABILITY, ROUTING_POLICY_VERSION, routeCustomerResearch } from "../workforce/capability-routing.mjs";
 import { BOUNDS } from "./records.mjs";
 import { TASK_STATES } from "./work.mjs";
+import { BOUNDED_SWARM_PARALLELISM } from "./bounded-swarm.mjs";
 
 export const CONTINUATION_POLICY_VERSION = "v0b4.1";
 export const MAX_CONTINUATION_STEPS = 16;
@@ -120,6 +122,9 @@ function evaluateTask(task, context) {
     reviewProducerByTask,
     employees,
     positions,
+    work,
+    hiringByEmployeeId,
+    activationSkills,
   } = context;
   const requirements = requirementsOf(requirementsByTask, task.id);
   const assignment = assignmentsByTask.get(task.id) ?? null;
@@ -131,26 +136,38 @@ function evaluateTask(task, context) {
   const producerEmployeeId = reviewProducerByTask.get(task.id) ?? null;
   const excludeEmployeeIds = producerEmployeeId ? [producerEmployeeId] : [];
 
-  const dispatch = deriveWorkforceDispatch({
+  let dispatch = deriveWorkforceDispatch({
     employees,
     positions,
     requiredCapabilities: requirements,
     activeEmployeeIds,
     excludeEmployeeIds,
   });
+  const routed = requirements.length === 1 && requirements[0] === ROUTED_CAPABILITY
+    ? routeCustomerResearch({ companyId: work.companyId, workId: work.id, taskId: task.id,
+      employees: employees.filter(employee => !excludeEmployeeIds.includes(employee.id)),
+      positions, hiringByEmployeeId, activeEmployeeIds, activationSkills }) : null;
+  if (routed) dispatch = {
+    eligible: routed.eligible, disabledCapable: dispatch.disabledCapable,
+    dispatchable: routed.eligible.filter(candidate => !candidate.busy),
+    busyEligible: routed.eligible.filter(candidate => candidate.busy),
+    capabilityGap: routed.eligible.length === 0,
+    contention: routed.gap === "ALL_ELIGIBLE_BUSY",
+  };
 
   const assignedEligible = Boolean(
     assigned &&
       assigned.enabled &&
       assignedPosition &&
       satisfiesCapabilities(requirements, assignedPosition.capabilities) &&
-      assigned.id !== producerEmployeeId,
+      assigned.id !== producerEmployeeId &&
+      (!routed || routed.eligible.some(candidate => candidate.employee.id === assigned.id)),
   );
   const assignedDispatchable = Boolean(
     assigned && dispatch.dispatchable.some((candidate) => candidate.employee.id === assigned.id),
   );
 
-  return { requirements, assignment, assigned, assignedEligible, assignedDispatchable, dispatch };
+  return { requirements, assignment, assigned, assignedEligible, assignedDispatchable, dispatch, routed };
 }
 
 const STOP = (boundary, extra = {}) => ({
@@ -174,13 +191,20 @@ export function deriveProgressBoundary({
   reviewRequests = [],
   reviews = [],
   repairBindings = [],
+  dependencies = [],
+  artifacts = [],
   employees = [],
   positions = [],
   activeEmployeeIds = [],
   reviewProducerByTask = new Map(),
   workerRunsByTask = new Map(),
+  hiringByEmployeeId = new Map(),
+  activationSkills = [],
 } = {}) {
   const context = {
+    work,
+    hiringByEmployeeId,
+    activationSkills,
     requirementsByTask,
     assignmentsByTask,
     employeesById: new Map(employees.map((employee) => [employee.id, employee])),
@@ -192,6 +216,20 @@ export function deriveProgressBoundary({
   };
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const repairsByReview = new Set(repairBindings.map((binding) => binding.reviewId));
+  const prerequisitesByTask = new Map();
+  for (const edge of dependencies) {
+    const list = prerequisitesByTask.get(edge.taskId) ?? [];
+    list.push(edge.prerequisiteTaskId);
+    prerequisitesByTask.set(edge.taskId, list);
+  }
+  const inputsReady = (task) => (prerequisitesByTask.get(task.id) ?? []).every((id) => {
+    const source = taskById.get(id);
+    if (!source || source.state !== TASK_STATES.COMPLETED) return false;
+    const outputs = artifacts.filter((artifact) => artifact.taskId === id && artifact.generation === source.generation);
+    return outputs.length === 1 && Boolean(outputs[0].workerRunId) &&
+      (workerRunsByTask.get(id) ?? []).some((run) => run.id === outputs[0].workerRunId && run.state === "COMPLETED") &&
+      Buffer.byteLength(outputs[0].content) <= 24 * 1024;
+  });
 
   // 1. A Founder Decision closes the Work to the Runtime for good.
   if (decision) return STOP(BOUNDARIES.ACCEPTED);
@@ -202,7 +240,8 @@ export function deriveProgressBoundary({
 
   // 3. An attempt is executing right now. Waiting is not an action.
   const running = tasks.filter((task) => task.state === TASK_STATES.RUNNING);
-  if (running.length > 0) return STOP(BOUNDARIES.RUNNING, { taskId: running[0].id });
+  if (running.length > 0 && (dependencies.length === 0 || running.length >= BOUNDED_SWARM_PARALLELISM))
+    return STOP(BOUNDARIES.RUNNING, { taskId: running[0].id });
 
   // 4. An interrupted Task. v0B4 continues it when it deterministically can;
   // when it cannot, the Work needs the Founder (v0B3 attention, narrowed).
@@ -242,13 +281,14 @@ export function deriveProgressBoundary({
         reviewId: null,
         candidates,
       };
-    if (evaluated.dispatch.dispatchable.length === 1)
+    if (evaluated.routed ? evaluated.routed.selected : evaluated.dispatch.dispatchable.length === 1)
       return {
         boundary: BOUNDARIES.INTERRUPTED,
         action: {
           command: CONTINUATION_ACTIONS.ASSIGN,
           taskId: interrupted.id,
           employeeId: evaluated.dispatch.dispatchable[0].employee.id,
+          ...(evaluated.routed ? { routingPolicyVersion: ROUTING_POLICY_VERSION } : {}),
         },
         diagnostic: null,
         taskId: interrupted.id,
@@ -258,7 +298,7 @@ export function deriveProgressBoundary({
     return STOP(BOUNDARIES.INTERRUPTED, {
       taskId: interrupted.id,
       candidates,
-      diagnostic: contentionDiagnostic(evaluated.dispatch, interrupted.id),
+      diagnostic: contentionDiagnostic(evaluated.dispatch, interrupted.id, evaluated.routed?.gap),
     });
   }
 
@@ -279,9 +319,10 @@ export function deriveProgressBoundary({
     };
 
   // 6. Ordinary open work: dispatch it, or say precisely why it cannot be.
-  const open = tasks.filter((task) => task.state === TASK_STATES.OPEN).sort(byCreatedAtThenId);
-  if (open.length > 0) {
-    const task = open[0];
+  const allOpen = tasks.filter((task) => task.state === TASK_STATES.OPEN).sort(byCreatedAtThenId);
+  const open = allOpen.filter(inputsReady);
+  let firstBlockedOpen = null;
+  for (const task of dependencies.length ? open : open.slice(0, 1)) {
     const evaluated = evaluateTask(task, context);
     const candidates = candidateView(evaluated.dispatch);
     if (evaluated.assignedEligible) {
@@ -294,31 +335,44 @@ export function deriveProgressBoundary({
           reviewId: null,
           candidates,
         };
-      return STOP(BOUNDARIES.READY_TO_START, {
+      firstBlockedOpen ??= STOP(BOUNDARIES.READY_TO_START, {
         taskId: task.id,
         candidates,
-        diagnostic: contentionDiagnostic(evaluated.dispatch, task.id),
+        diagnostic: contentionDiagnostic(evaluated.dispatch, task.id, evaluated.routed?.gap),
       });
+      continue;
     }
-    if (evaluated.dispatch.dispatchable.length === 1)
+    if (evaluated.routed ? evaluated.routed.selected : evaluated.dispatch.dispatchable.length === 1)
       return {
         boundary: BOUNDARIES.UNASSIGNED_TASK,
         action: {
           command: CONTINUATION_ACTIONS.ASSIGN,
           taskId: task.id,
           employeeId: evaluated.dispatch.dispatchable[0].employee.id,
+          ...(evaluated.routed ? { routingPolicyVersion: ROUTING_POLICY_VERSION } : {}),
         },
         diagnostic: null,
         taskId: task.id,
         reviewId: null,
         candidates,
       };
-    return STOP(BOUNDARIES.UNASSIGNED_TASK, {
+    firstBlockedOpen ??= STOP(BOUNDARIES.UNASSIGNED_TASK, {
       taskId: task.id,
       candidates,
-      diagnostic: contentionDiagnostic(evaluated.dispatch, task.id),
+      diagnostic: contentionDiagnostic(evaluated.dispatch, task.id, evaluated.routed?.gap),
     });
   }
+
+  if (firstBlockedOpen && running.length === 0) return firstBlockedOpen;
+
+  if (running.length > 0) return STOP(BOUNDARIES.RUNNING, { taskId: running[0].id });
+  if (firstBlockedOpen) return firstBlockedOpen;
+  if (allOpen.length > 0)
+    return STOP(BOUNDARIES.BLOCKED, { taskId: allOpen[0].id, diagnostic: {
+      code: CONTINUATION_DIAGNOSTICS.COLLABORATION_BLOCKED,
+      reason: "a prerequisite has no completed, bounded Artifact for its dependent Task",
+      evidence: { taskId: allOpen[0].id },
+    } });
 
   // 7. A Work with no Tasks has never been activated. v0B4's only REPLAN: the
   // Driver asks the proposer for one initial Task and materializes it.
@@ -352,7 +406,11 @@ export function deriveProgressBoundary({
 // Contention and ambiguity are different failures with different owners:
 // contention clears itself when the busy Employee finishes, ambiguity never
 // clears itself and the Runtime refuses to pick.
-function contentionDiagnostic(dispatch, taskId) {
+function contentionDiagnostic(dispatch, taskId, routingGap = null) {
+  if (routingGap === "CANDIDATE_BOUND_EXCEEDED")
+    return { code: CONTINUATION_DIAGNOSTICS.DISPATCH_AMBIGUOUS,
+      reason: "bounded routing refuses a Task with more than three eligible Employees",
+      evidence: { taskId, eligibleCount: dispatch.eligible.length } };
   if (dispatch.dispatchable.length > 1)
     return {
       code: CONTINUATION_DIAGNOSTICS.DISPATCH_AMBIGUOUS,

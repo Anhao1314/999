@@ -26,9 +26,13 @@ export const EXECUTION_CONFIG_PASSTHROUGH = Object.freeze([
   "FLOWCREDIT_CODEX_PROTECTED_PATHS",
   "FLOWCREDIT_CODEX_EVIDENCE_DIR",
   "FLOWCREDIT_WORKER_TIMEOUT_MS",
+  "FLOWCREDIT_RELAY_SENSE",
+  "FLOWCREDIT_LAYA_SHADOW_URL",
+  "TYPESAFE_API_KEY",
+  "FLOWCREDIT_DEEPSEEK_API_KEY",
 ]);
 
-export const WORKER_BACKENDS = Object.freeze(["off", "test-worker", "codex-exec"]);
+export const WORKER_BACKENDS = Object.freeze(["off", "test-worker", "codex-exec", "deepseek-hiring"]);
 export const CODEX_BACKEND = "codex-exec";
 export const CODEX_EXECUTABLE_ENV = "FLOWCREDIT_CODEX_BIN";
 

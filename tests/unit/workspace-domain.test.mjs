@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   CONNECTION,
   NAV_ITEMS,
-  PLACEHOLDERS,
   WorkspaceStore,
   acceptedStateText,
   actionText,
@@ -13,10 +12,13 @@ import {
   attentionKindText,
   attentionLeadText,
   availabilityText,
+  companyMoment,
   conditionText,
   detailBasis,
   freshness,
+  lineageEvidence,
   outcomeText,
+  pulseStory,
   roleText,
   stageText,
   taskStateText,
@@ -141,7 +143,48 @@ test('the workforce line is a pure function of projection counts', () => {
   assert.equal(workforceSummaryLine(null), '暂无员工数据');
 });
 
-test('attention, navigation and placeholders are bounded presentation facts', () => {
+test('company moment uses only observed attention and work facts', () => {
+  assert.equal(companyMoment(null).tone, 'unknown');
+  assert.equal(companyMoment(projectionOf()).title, '公司正在等待第一个目标');
+  assert.equal(companyMoment(projectionOf({
+    workforce: { working: 2 },
+  })).title, '公司正在工作');
+  const attention = companyMoment(projectionOf({
+    attention: { count: 1, items: [{ work: { title: '发布前的定位说明' } }] },
+    workforce: { working: 2 },
+  }));
+  assert.equal(attention.title, '1 件事需要你');
+  assert.match(attention.detail, /发布前的定位说明/);
+  assert.equal(attention.tone, 'attention');
+});
+
+test('company pulse stays narrative and does not turn missing facts into zero', () => {
+  assert.deepEqual(pulseStory(null), ['当前没有可核对的公司近况。']);
+  assert.deepEqual(pulseStory({ pulse: {} }), ['当前没有可核对的公司近况。']);
+  const lines = pulseStory(projectionOf({
+    pulse: { employeesWorking: 2, reviewsActive: 1, repairsActive: 1 },
+    recentDeliveries: [{ title: '定位说明' }],
+  }));
+  assert.deepEqual(lines, ['2 位员工正在执行', '1 项评审进行中', '1 项返工进行中', '最近交付：定位说明']);
+});
+
+test('action trail ties review and repair to an exact recorded artifact version', () => {
+  const lineage = {
+    steps: [
+      { employeeName: '小林', artifacts: [{ artifactId: 'a1', versionIndex: 2, title: '定位说明' }] },
+      { review: { targetArtifactId: 'a1', verdict: 'REQUEST_REVISION' } },
+      { repair: { targetArtifactId: 'a1' } },
+    ],
+    founderBoundary: { waitingForFounder: true },
+  };
+  assert.deepEqual(lineageEvidence(lineage, 0), []);
+  assert.equal(lineageEvidence(lineage).length, 3);
+  assert.match(lineageEvidence(lineage, 4)[1].text, /产物 v2《定位说明》/);
+  assert.match(lineageEvidence(lineage, 4)[2].text, /产物 v2《定位说明》/);
+  assert.equal(lineageEvidence({ steps: [{ review: { targetArtifactId: 'missing' } }] })[0].artifactId, null);
+});
+
+test('attention and subpage navigation are bounded presentation facts', () => {
   assert.equal(attentionCount(projectionOf()), 0);
   assert.equal(attentionCount(projectionOf({ attention: { count: 2, items: [] } })), 2);
   assert.equal(attentionCount(null), 0);
@@ -149,8 +192,8 @@ test('attention, navigation and placeholders are bounded presentation facts', ()
   for (const id of ['workspace', 'work', 'employees', 'hiring', 'artifacts', 'knowledge', 'settings'])
     assert.ok(kinds.has(id), id);
   assert.equal(NAV_ITEMS.find((item) => item.id === 'employees').href, '/employees');
-  assert.match(PLACEHOLDERS.hiring.message, /Hiring MVP/);
-  assert.match(PLACEHOLDERS.knowledge.message, /Knowledge layer/);
+  for (const id of ['work', 'hiring', 'artifacts', 'knowledge', 'settings'])
+    assert.equal(NAV_ITEMS.find((item) => item.id === id).kind, 'SUBPAGE');
 });
 
 test('a projection replaces the read model whole; transport never rewrites it', () => {

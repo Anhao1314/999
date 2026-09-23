@@ -103,10 +103,12 @@ export function createToolBudget({
   return Object.freeze({ maxToolCalls, maxCallsByCapability: Object.freeze(limits), maxElapsedMs, toolTimeoutMs });
 }
 
-export function createAuthorizedToolSession({ run, grant, budget, actuators = [], now = () => performance.now() } = {}) {
+export function createAuthorizedToolSession({ run, grant, budget, actuators = [],
+  now = () => performance.now(), onReceipt = null } = {}) {
   if (grant?.workerRunId !== run?.id || grant?.generation !== run?.generation)
     throw new Error("ToolGrant does not belong to this WorkerRun generation");
   if (!budget || !Number.isInteger(budget.maxToolCalls)) throw new Error("ToolBudget is required");
+  if (onReceipt !== null && typeof onReceipt !== "function") throw new Error("onReceipt must be a function");
   const available = actuators.map(assertActuator);
   const sourceCapable = available.some((actuator) => Array.isArray(actuator.sourceObservationCapabilities) && actuator.sourceObservationCapabilities.length > 0);
   const controller = new AbortController();
@@ -119,14 +121,23 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
   let calls = 0;
   let terminalFailure = null;
 
-  const record = ({ callId, capability, status, inputDigest = null, outputDigest = null, durationMs = 0, sourceId = null }) => {
+  const record = ({ callId, capability, status, inputDigest = null, outputDigest = null,
+    durationMs = 0, source = null, actuator = null }) => {
     if (receipts.length >= MAX_TOOL_CALLS + 1) return;
-    receipts.push(Object.freeze({
+    const receipt = Object.freeze({
       callId: typeof callId === "string" ? callId.slice(0, 80) : null,
       capability: typeof capability === "string" ? capability.slice(0, 80) : null,
       status, inputDigest, outputDigest, durationMs,
-      ...(sourceId ? { sourceId } : {}),
-    }));
+      ...(source ? { sourceId: source.sourceId } : {}),
+    });
+    receipts.push(receipt);
+    try {
+      onReceipt?.({ receipt: Object.freeze({ ...receipt, sequence: receipts.length }), source, actuator });
+    } catch {
+      terminalFailure = "EVIDENCE_PERSIST_FAILED";
+      controller.abort();
+      throw new ToolSessionError("EVIDENCE_PERSIST_FAILED", "durable tool evidence could not be recorded");
+    }
   };
   const fail = (code, message, callId = null, capability = null, inputDigest = null) => {
     if (!terminalFailure) {
@@ -156,13 +167,14 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
       if (typeof encodedInput !== "string" || Buffer.byteLength(encodedInput) > MAX_TOOL_INPUT_BYTES)
         fail("TOOL_PROTOCOL_ERROR", "tool input is too large", callId, capability);
       const inputDigest = digestOf(encodedInput);
-      const receipt = (status, outputDigest = null, durationMs = 0, sourceId = null) => {
-        record({ callId, capability, status, inputDigest, outputDigest, durationMs, sourceId });
+      let actuator;
+      const receipt = (status, outputDigest = null, durationMs = 0, source = null) => {
+        record({ callId, capability, status, inputDigest, outputDigest, durationMs, source,
+          actuator: status === "SUCCEEDED" ? actuator : null });
       };
       if (!grant.capabilities.includes(capability)) {
         fail("TOOL_DENIED", "tool capability was not granted", callId, capability, inputDigest);
       }
-      let actuator;
       try { actuator = available.find((candidate) => candidate.supports(capability)); }
       catch { fail("TOOL_UNAVAILABLE", "actuator availability check failed", callId, capability, inputDigest); }
       if (!actuator) {
@@ -211,9 +223,10 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
           issuedSourceIds.add(source.sourceId);
           sources.push(source);
         }
-        receipt("SUCCEEDED", outputDigest, now() - began, source?.sourceId);
+        receipt("SUCCEEDED", outputDigest, now() - began, source);
         return Object.freeze({ type: "TOOL_RESULT", callId, capability, status: "SUCCEEDED", output });
       } catch (error) {
+        if (error instanceof ToolSessionError && error.code === "EVIDENCE_PERSIST_FAILED") throw error;
         const code = controller.signal.aborted || signal?.aborted
           ? "ABORTED"
           : attempt.signal.aborted ? "TOOL_TIMEOUT"

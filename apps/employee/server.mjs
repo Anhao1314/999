@@ -9,11 +9,11 @@ import { isLocalBrowserRequest } from '../local-origin.mjs';
 
 const ROOT = new URL('./', import.meta.url);
 const ASSETS = new Set([
-  'app.mjs', 'adapter.mjs', 'domain.mjs', 'demo.mjs', 'avatar.mjs', 'styles.css',
+  'scene-background.mjs', 'scene-background.css', 'scene-preference.mjs', 'launch-mars.mp4', 'app.mjs', 'adapter.mjs', 'domain.mjs', 'demo.mjs', 'avatar.mjs', 'styles.css', 'ui-tokens.css', 'icons.mjs', 'surface-motion.mjs',
   ...Array.from({ length: 8 }, (_, i) => `assets/portrait-${i + 1}.png`),
   ...Array.from({ length: 8 }, (_, i) => `assets/sprite-${i + 1}.png`),
 ]);
-const TYPES = { mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png', html: 'text/html; charset=utf-8' };
+const TYPES = { mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png', mp4: 'video/mp4', html: 'text/html; charset=utf-8' };
 
 // Re-exported for the Runtime process, which gates /commands with the same rule.
 export { isLocalBrowserRequest };
@@ -38,12 +38,13 @@ export function createEmployeeRoutes({ enabled = true } = {}) {
       json(404, { error: { code: 'NOT_FOUND', message: '资源不存在' } });
       return true;
     }
-    const body = await readFile(new URL(file, ROOT));
+    const source = file === 'ui-tokens.css' || file === 'icons.mjs' || file === 'surface-motion.mjs' || file.startsWith('scene-') ? new URL(`../workspace/${file}`, ROOT) : file === 'launch-mars.mp4' ? new URL('../workspace/assets/launch-mars.mp4', ROOT) : new URL(file, ROOT);
+    const body = await readFile(source);
     response.writeHead(200, {
       'content-type': TYPES[file.split('.').at(-1)],
       'cache-control': 'no-cache',
       'x-content-type-options': 'nosniff',
-      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'",
     });
     response.end(body);
     return true;

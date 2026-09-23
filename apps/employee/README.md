@@ -6,11 +6,22 @@ An additive module hosted by the existing loopback Runtime at `/employees`. It a
 
 - `server.mjs`: same-process read projection, bounded public activity pagination, a small command adapter and static asset allowlist. It calls existing Kernel operations and does not choose work or employees autonomously.
 - `adapter.mjs`: all live browser requests; serial full-snapshot polling with abort/timeout cleanup. A persisted Activity head is a snapshot revision, **not** a contiguous event cursor. Older snapshots cannot replace newer ones.
-- `domain.mjs`: shared store, stable six-seat tables, separate Employee/Run/Task/connection/visual state, unknown usage and crop geometry.
+- `domain.mjs`: shared store, six display-only rooms with stable seats, separate Employee/Run/Task/connection/visual state, unknown usage and crop geometry.
 - `app.mjs`: lobby, roster, accessible native dialogs, inline settings/assignment/history, keyboard and history boundaries. Public text uses DOM text nodes.
 - `avatar.mjs`: local file MIME/magic/size checks. The browser decodes and crops; output is an in-memory PNG preview, never a server upload or persistent asset.
 - `demo.mjs`: explicitly requested `?demo=1` synthetic adapter. No HTTP writes. Demo config versions, command delays, guarded archive and message animations are not production capabilities.
 - `styles.css`: all styles are scoped under the employee page or `fc-` classes.
+
+## Employee continuity
+
+The live employee card groups evidence by time: recent deliveries and public
+activity, current Work and role, then the boundary for future capability
+evidence. These are bounded Experience reads, not a complete employee history.
+Provider, model, execution backend, identifiers and position capability
+definitions sit in a collapsed technical disclosure. A position capability is
+not presented as earned capability evidence, and no future Work match is
+invented. The production lobby no longer advertises the separate synthetic
+demo link; `?demo=1` remains an explicitly labelled direct test route.
 
 ## Provenance
 

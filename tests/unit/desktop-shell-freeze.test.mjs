@@ -41,6 +41,28 @@ test("Relay Code menu stays minimal and hides DevTools from packaged launches", 
   assert.equal(rolesOf(development).includes("toggleDevTools"), true);
 });
 
+test("desktop navigation menu uses the same page names, shortcuts and current-page mark", () => {
+  const destinations = [];
+  const menu = applicationMenuTemplate({
+    appName: "Relay Code",
+    isPackaged: true,
+    platform: "darwin",
+    currentPath: "/employees",
+    navigate: (path) => destinations.push(path),
+  });
+  const entries = menu.find((item) => item.label === "导航")?.submenu ?? [];
+  const company = entries.find((item) => item.label === "公司");
+  const employees = entries.find((item) => item.label === "AI 员工");
+  const search = entries.find((item) => item.label === "搜索当前页面");
+  assert.equal(company?.checked, false);
+  assert.equal(employees?.checked, true);
+  assert.equal(company?.accelerator, "CmdOrCtrl+1");
+  assert.equal(employees?.accelerator, "CmdOrCtrl+2");
+  assert.equal(search?.accelerator, "CmdOrCtrl+K");
+  company.click(); employees.click(); search.click();
+  assert.deepEqual(destinations, ["/workspace", "/employees", "search"]);
+});
+
 test("the frozen master icon is a valid, unmodified 1254x1254 PNG", async () => {
   const iconPath = fileURLToPath(
     new URL("../../apps/desktop/assets/relay-code-master.png", import.meta.url),
@@ -101,7 +123,6 @@ test("desktop source owns process lifecycle only and never commands the Runtime"
     "node:sqlite",
     "DatabaseSync",
     "contextBridge",
-    "ipcMain",
     "ipcRenderer",
     "/commands",
     "createCompany",

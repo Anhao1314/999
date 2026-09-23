@@ -9,7 +9,7 @@ const files = readdirSync(dir).filter((name) => /\.(mjs|html|css)$/.test(name));
 const source = Object.fromEntries(
   files.map((name) => [name, readFileSync(new URL(name, dir), 'utf8')]),
 );
-const frontend = ['app.mjs', 'adapter.mjs', 'domain.mjs'];
+const frontend = ['app.mjs', 'adapter.mjs', 'domain.mjs', 'subpages.mjs', 'icons.mjs', 'placement.mjs', 'board-layout.mjs'];
 const IMPORT_PATTERN = /(?:^|\n)\s*import\s+(?:[^"'();]*?from\s*)?["']([^"']+)["']/g;
 
 test('no Workspace code reads storage or speaks SQL: Experience is the only Runtime read path', () => {
@@ -56,8 +56,10 @@ test('the LIVE source is the workspace projection and nothing lower-level', () =
   assert.doesNotMatch(adapter, /\/workforce/);
   assert.doesNotMatch(adapter, /\/attention/);
   const app = source['app.mjs'];
-  for (const field of ['attention', 'primaryWork', 'workforce', 'recentDeliveries', 'pulse'])
+  for (const field of ['attention', 'primaryWork', 'workforce', 'recentDeliveries'])
     assert.match(app, new RegExp(`projection(\\?\\.|\\.)${field}`), `the canvas must render projection.${field}`);
+  assert.match(app, /pulseStory\(projection\)/);
+  assert.match(source['domain.mjs'], /projection\?\.pulse/);
   assert.match(app, /runtime-status/);
   assert.match(app, /状态来自|Runtime 暂不可用/);
 });
@@ -73,28 +75,42 @@ test('transport state is separate from Company and Employee state, and no demo f
   }
 });
 
-test('placeholder areas are honest and invent no LIVE data', () => {
-  const domain = source['domain.mjs'];
-  assert.match(domain, /招聘能力将在 Hiring MVP 中开放/);
-  assert.match(domain, /知识空间将在 Knowledge layer 接入后开放/);
-  assert.match(domain, /工作列表将在后续里程碑开放/);
-  assert.doesNotMatch(source['app.mjs'], /候选人|示例数据|mock|sample/i);
+test('Founder subpages keep hiring read only and avoid fake decisions', () => {
+  const subpages = source['subpages.mjs'];
+  for (const id of ['work', 'artifacts', 'hiring', 'knowledge', 'settings'])
+    assert.match(source['domain.mjs'], new RegExp(`id: '${id}'.*kind: 'SUBPAGE'`));
+  assert.match(subpages, /hiring: .*source: 'READ_ONLY'/);
+  assert.match(subpages, /source: 'LIVE'/);
+  assert.match(source['company-hiring.mjs'], /试用通过不自动聘用/);
+  assert.match(source['company-hiring.mjs'], /关闭后不会留下岗位或候选员工/);
+  assert.match(subpages, /尚未提供交付内容预览/);
+  assert.match(subpages, /当前界面尚未接入安全的产品创建命令/);
+  assert.match(subpages, /start\.disabled = true/);
+  assert.match(source['adapter.mjs'], /\/companies\/\$\{encodeURIComponent\(companyId\)\}\/works/);
 });
 
 test('the workforce widget links to the merged Lobby and reuses its assets', () => {
   const app = source['app.mjs'];
   assert.match(app, /'\/employees'/);
   assert.match(app, /\/employee-assets\/assets\/portrait-/);
+  assert.match(app, /projection\?\.founderAssistant/);
+  assert.match(app, /\/employee-assets\/assets\/sprite-/);
+  assert.match(source['index.html'], /id="assistant-pet"/);
+  assert.match(source['index.html'], /id="assistant-bubble"/);
 });
 
-test('no forbidden raw execution field is rendered', () => {
+test('read-only execution and artifact projections contain no model messages or credentials', () => {
   for (const name of frontend) {
     assert.doesNotMatch(
       source[name],
-      /workerRunId|sessionId|processId|workspacePath|jsonl|contentDigest|artifactDigest|\bprompt\b/,
-      `${name} must not surface raw execution detail`,
+      /sessionId|processId|workspacePath|jsonl|\bprompt\b|chainOfThought|apiKey|secretValue/,
+      `${name} must not surface process internals, model messages or credentials`,
     );
   }
+  assert.match(source['adapter.mjs'], /live-action/);
+  assert.match(source['adapter.mjs'], /artifactReading/);
+  assert.match(source['app.mjs'], /workerRunId/);
+  assert.match(source['app.mjs'], /真实交付正文/);
 });
 
 test('the page shell serves the Workspace client and text nodes only', () => {
@@ -102,4 +118,32 @@ test('the page shell serves the Workspace client and text nodes only', () => {
   assert.match(page, /\/workspace-assets\/app\.mjs/);
   assert.match(page, /工作台/);
   assert.doesNotMatch(page, /<script(?![^>]*src=)/);
+  assert.match(source['server.mjs'], /'icons\.mjs'/);
+  assert.match(source['app.mjs'], /symbol\(id\)/);
+  assert.match(source['subpages.mjs'], /symbol\(state\.id\)/);
+  assert.match(page, /id="page-popover-mark"/);
+});
+
+test('Company Canvas keeps presentation local and Work submission unavailable', () => {
+  const page = source['index.html'];
+  const app = source['app.mjs'];
+  const server = source['server.mjs'];
+  assert.match(page, /id="new-work"[^>]*disabled/);
+  assert.match(app, /projection\.primaryWork/);
+  assert.match(app, /projection\.attention/);
+  assert.match(app, /projection\.workforce/);
+  assert.match(app, /projection\.recentDeliveries/);
+  assert.match(app, /pulseStory\(projection\)/);
+  assert.match(app, /lineageEvidence\(lineage\)/);
+  assert.match(page, /id="presentation-toggle"/);
+  assert.match(app, /function renderBoard/);
+  assert.match(app, /function openBoardSummary/);
+  assert.match(app, /function openBoardDetail/);
+  assert.match(app, /clampCardPosition/);
+  assert.match(app, /function companyWelcome/);
+  assert.match(app, /event\.metaKey/);
+  assert.match(app, /event\.ctrlKey/);
+  assert.doesNotMatch(app, /localStorage|sessionStorage|indexedDB/);
+  assert.doesNotMatch(page + app + server, /\/company(?:\/|['"`])/);
+  assert.doesNotMatch(app, /Accept|Dismiss|Resolve|发送消息/);
 });

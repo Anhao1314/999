@@ -17,31 +17,34 @@ export const CONNECTION = Object.freeze({
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
 });
 
-// What the screen can show in the central canvas. `workspace` is the real
-// product; the others are honest placeholders until their milestone lands.
+// Structured requests are business intent, not a string of implementation fields.
+export function workIntentText(intent) {
+  if (typeof intent !== 'string') return '';
+  const text = intent.trim();
+  if (!text.startsWith('{') && !text.startsWith('[')) return text;
+  let request;
+  try { request = JSON.parse(text); } catch { return text; }
+  if (request?.requestKind === 'MarketEntryResearch.v0') {
+    const parts = [];
+    if (typeof request.market === 'string') parts.push(`目标市场：${request.market}`);
+    if (typeof request.category === 'string') parts.push(`研究品类：${request.category}`);
+    if (Number.isInteger(request.candidateCount) && request.candidateCount > 0) parts.push(`${request.candidateCount} 个候选产品`);
+    if (parts.length) return parts.join(' · ');
+  }
+  return '已记录结构化工作目标；任务与交付详情可在工作线中查看。';
+}
+
+// Navigation destinations share a bounded floating page shell. Prototype
+// destinations are explicitly labelled in the page itself.
 export const NAV_ITEMS = Object.freeze([
   { id: 'workspace', label: '公司', kind: 'VIEW' },
-  { id: 'work', label: '工作', kind: 'PLACEHOLDER' },
-  { id: 'employees', label: 'AI 员工', kind: 'LINK', href: '/employees' },
-  { id: 'hiring', label: '招聘', kind: 'PLACEHOLDER' },
-  { id: 'artifacts', label: '成果', kind: 'PLACEHOLDER' },
-  { id: 'knowledge', label: '知识', kind: 'PLACEHOLDER' },
-  { id: 'settings', label: '设置', kind: 'PLACEHOLDER' },
+  { id: 'work', label: '工作', kind: 'SUBPAGE' },
+  { id: 'employees', label: '员工', kind: 'LINK', href: '/employees' },
+  { id: 'knowledge', label: '记忆', kind: 'SUBPAGE' },
+  { id: 'settings', label: '设置', kind: 'SUBPAGE' },
+  { id: 'hiring', label: '招聘', kind: 'SUBPAGE', group: 'secondary' },
+  { id: 'artifacts', label: '交付物', kind: 'SUBPAGE', group: 'secondary' },
 ]);
-
-export const PLACEHOLDERS = Object.freeze({
-  work: {
-    title: '工作',
-    message: '工作列表将在后续里程碑开放。Runtime 里的每一份 Work 都会在这里展开。',
-  },
-  hiring: { title: '招聘', message: '招聘能力将在 Hiring MVP 中开放。' },
-  artifacts: {
-    title: '成果',
-    message: '成果库将在 Artifact 视图接入 Experience 投影后开放。',
-  },
-  knowledge: { title: '知识', message: '知识空间将在 Knowledge layer 接入后开放。' },
-  settings: { title: '设置', message: '设置将在后续里程碑开放。' },
-});
 
 // --- frozen vocabulary, rendered -------------------------------------------
 //
@@ -239,6 +242,81 @@ export function workforceSummaryLine(summary) {
 
 export const attentionCount = (projection) => projection?.attention?.count ?? 0;
 
+// Founder-facing language derived only from the current Experience projection.
+// An absent field stays unknown; it must not become a zero or a claim of work.
+export function companyMoment(projection) {
+  if (!projection) return { title: '公司状态暂不可读', detail: '等待 Runtime 投影。', tone: 'unknown' };
+  const needs = projection.attention?.count;
+  if (Number.isFinite(needs) && needs > 0) return {
+    title: `${needs} 件事需要你`,
+    detail: projection.attention.items?.[0]
+      ? `${projection.attention.items[0].work?.title ?? '当前工作'} · ${attentionLeadText(projection.attention.items[0].kind)}`
+      : '打开待处理事项查看原因与可用动作。',
+    tone: 'attention',
+  };
+  const working = projection.workforce?.working;
+  if (Number.isFinite(working) && working > 0) return {
+    title: '公司正在工作',
+    detail: `${working} 位员工正在执行；你可以查看当前工作与交付。`,
+    tone: 'working',
+  };
+  if (projection.primaryWork) return {
+    title: '目前没有需要你处理的事',
+    detail: '当前工作与已有记录仍可在下方查看。',
+    tone: 'quiet',
+  };
+  return { title: '公司正在等待第一个目标', detail: 'Runtime 中尚无 Work。', tone: 'quiet' };
+}
+
+export function pulseStory(projection) {
+  const pulse = projection?.pulse;
+  if (!pulse) return ['当前没有可核对的公司近况。'];
+  const lines = [];
+  if (Number.isFinite(pulse.employeesWorking) && pulse.employeesWorking > 0)
+    lines.push(`${pulse.employeesWorking} 位员工正在执行`);
+  if (Number.isFinite(pulse.reviewsActive) && pulse.reviewsActive > 0)
+    lines.push(`${pulse.reviewsActive} 项评审进行中`);
+  if (Number.isFinite(pulse.repairsActive) && pulse.repairsActive > 0)
+    lines.push(`${pulse.repairsActive} 项返工进行中`);
+  if (lines.length === 0 && Number.isFinite(pulse.activeWorks))
+    lines.push(pulse.activeWorks > 0 ? '有工作记录，当前未观察到员工执行' : '当前没有进行中的工作');
+  const latest = projection.recentDeliveries?.[0];
+  if (latest) lines.push(`最近交付：${latest.title ?? '未命名产物'}`);
+  return lines.length ? lines : ['当前没有可核对的公司近况。'];
+}
+
+// A bounded action trail from Work lineage. These are recorded assignments,
+// Artifacts, ReviewRequests and verdicts, never inferred tool success.
+export function lineageEvidence(lineage, limit = 3) {
+  const steps = lineage?.steps ?? [];
+  const artifacts = new Map(steps.flatMap((step) => (step.artifacts ?? []).map((artifact) => [artifact.artifactId, artifact])));
+  const version = (artifact) => artifact?.versionIndex ?? artifact?.generation ?? null;
+  const label = (artifact) => artifact ? `产物${version(artifact) == null ? '' : ` v${version(artifact)}`}《${artifact.title ?? '未命名产物'}》` : '目标产物（当前窗口未提供）';
+  const events = [];
+  for (const step of steps) {
+    for (const artifact of step.artifacts ?? []) events.push({
+      kind: 'ARTIFACT', text: `${step.employeeName ?? '产出者未记录'}交付了${label(artifact)}`, artifactId: artifact.artifactId,
+    });
+    if (step.review) {
+      const target = label(artifacts.get(step.review.targetArtifactId));
+      events.push({
+        kind: 'REVIEW',
+        text: step.review.verdict === 'PASS' ? `${target}评审通过，仍需 Founder 决定`
+          : step.review.verdict === 'REQUEST_REVISION' ? `${target}被要求修订`
+            : step.state === 'RUNNING' ? `${target}正在接受评审` : `${target}已请求评审`,
+        artifactId: artifacts.has(step.review.targetArtifactId) ? step.review.targetArtifactId : null,
+      });
+    }
+    if (step.repair) events.push({
+      kind: 'REPAIR', text: `已建立针对${label(artifacts.get(step.repair.targetArtifactId))}的返工任务`,
+      artifactId: artifacts.has(step.repair.targetArtifactId) ? step.repair.targetArtifactId : null,
+    });
+  }
+  if (lineage?.founderBoundary?.waitingForFounder)
+    events.push({ kind: 'FOUNDER', text: '已有事项等待 Founder 处理', artifactId: null });
+  return limit > 0 ? events.slice(-limit).reverse() : [];
+}
+
 // A stable signature of the facts that change what a selected detail shows.
 // The client refetches a selected Employee/Work when this changes, and not on
 // every poll: a projection that did not move is not re-read.
@@ -253,6 +331,7 @@ export function detailBasis(projection) {
       card.role,
       card.condition,
     ]),
+    projection.founderAssistant ?? null,
     (projection.recentDeliveries ?? []).map((delivery) => [
       delivery.artifactId,
       delivery.reviewState,

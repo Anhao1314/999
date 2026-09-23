@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#090807">
+  <meta name="referrer" content="no-referrer"><title>启程 · FlowCredit</title>
+  <link rel="stylesheet" href="/workspace-assets/welcome.css">
+</head>
+<body>
+<main class="experience" id="experience" aria-label="FlowCredit 启动页">
+  <div class="background" aria-hidden="true"><video id="background-video" muted playsinline preload="auto"></video><div class="shade"></div></div>
+  <div class="preloader" id="preloader" aria-hidden="true"><video id="intro-video" muted playsinline preload="auto"></video><div class="shade"></div></div>
+  <div class="floating-logo" id="floating-logo" aria-hidden="true"><img src="/workspace-assets/flowcredit-brand.png" alt=""><span>FlowCredit</span></div>
+  <div class="preloader-count" id="preloader-count" aria-hidden="true"><span id="count">0</span><small>%</small><p>准备启程</p></div>
+  <canvas id="portal-canvas" aria-hidden="true"></canvas>
+  <header class="header chrome">
+    <a class="brand" href="/workspace" aria-label="FlowCredit · 直接进入首页"><img src="/workspace-assets/flowcredit-brand.png" alt=""><strong>FlowCredit</strong></a>
+    <nav class="nav" aria-label="启动页导航"><span aria-current="page">启程</span><a href="/workspace" data-enter>公司首页</a><a href="/employees" data-enter>AI 员工</a></nav>
+    <button class="motion-toggle" id="motion-toggle" aria-pressed="false" type="button"><span class="motion-symbol" aria-hidden="true">Ⅱ</span><span id="motion-label">暂停动态</span></button>
+  </header>
+  <a class="skip" href="/workspace">直接进入 <span aria-hidden="true">↗</span></a>
+  <aside class="destinations chrome" aria-label="选择目的地"><p>YOUR NEXT CHAPTER</p><a href="/workspace" class="active" data-enter><span>01</span>公司首页<i aria-hidden="true">↗</i></a><a href="/employees" data-enter><span>02</span>AI 员工<i aria-hidden="true">↗</i></a><div class="destination-note">从一个想法，<br>到一家无限可能的公司。</div></aside>
+  <section class="portal-wrap" aria-label="进入你的公司"><div class="portal-heading chrome"><span>NEXT DESTINATION</span><strong>你的公司 <small>[ 01 ]</small></strong></div><a id="portal" class="portal" href="/workspace" data-enter aria-label="进入首页"><span class="portal-enter"><span class="enter-arrow" aria-hidden="true">↗</span><span>进入首页</span></span></a><p class="portal-caption chrome">一次启程，无限可能。</p></section>
+  <footer class="planet-content chrome"><div class="title"><p>让想法，无限流动。</p><h1>FLOW<span>CREDIT</span></h1></div><dl><div class="fact"><dt>起点</dt><dd>一个人，也能开启一家公司。</dd></div><div class="fact"><dt>同行者</dt><dd>你的 AI 员工团队</dd></div><div class="fact"><dt>目的地</dt><dd>把下一个想法，变成现实。<span aria-hidden="true">↗</span></dd></div></dl></footer>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+  <video id="portal-video" class="media-source" muted playsinline preload="auto" aria-hidden="true"></video>
+  <div class="cursor" id="cursor" aria-hidden="true"><span></span><small>Enter</small></div>
+</main>
+<script type="module" src="/workspace-assets/welcome.mjs"></script>
+</body>
+</html>
