@@ -77,7 +77,7 @@ const INTERRUPTION_REASON = "PROCESS_INTERRUPTED";
 // describe execution failure — never Founder authority, cancellation, a verdict
 // or a success result.
 //
-// The four reasons draw one line precisely: how the attempt ended, and whether
+// These reasons draw one line precisely: how the attempt ended, and whether
 // the Worker's own result was ever usable.
 //   WORKER_TIMEOUT        the Host stopped an attempt that ran out of time;
 //   WORKER_PROCESS_EXIT   the child process failed (spawn, signal, non-zero exit);
@@ -89,11 +89,14 @@ const INTERRUPTION_REASON = "PROCESS_INTERRUPTED";
 //                         a changed protected path, no required change, an
 //                         oversized diff). The specific postcondition stays in
 //                         HarnessEvidence; the Runtime sees only this reason.
+//   WORKER_EXECUTION_FAILED a non-process model/tool execution ended without a
+//                         usable candidate; the bounded detail stays Host-side.
 export const WORKER_INTERRUPTION_REASONS = Object.freeze([
   "WORKER_TIMEOUT",
   "WORKER_PROCESS_EXIT",
   "WORKER_PROTOCOL_ERROR",
   "WORKER_OUTPUT_REJECTED",
+  "WORKER_EXECUTION_FAILED",
 ]);
 
 // Ending a WorkerRun always produces the matching audit event, from wherever

@@ -50,6 +50,14 @@ export {
 } from "./execution-binding.mjs";
 export { STATIC_RESOLVER_TYPE, createStaticWorkerBackendResolver } from "./resolver.mjs";
 export { DEFAULT_WAIT_TIMEOUT_MS, HOST_STATUS, createWorkerHost } from "./host.mjs";
+export { assertActuator, createAuthorizedToolSession, createToolBudget, createToolGrant, ToolSessionError } from "./tool-session.mjs";
+export { assertModelBackend, createTestModelBackend } from "./model-backend.mjs";
+export { createFakeActuator } from "./adapters/fake-actuator.mjs";
+export {
+  GENERIC_MODEL_WORKER_ADAPTER_TYPE,
+  GENERIC_MODEL_WORKER_ADAPTER_VERSION,
+  createGenericModelWorkerAdapter,
+} from "./adapters/generic-model-worker.mjs";
 export {
   CODEX_EXEC_ADAPTER_TYPE,
   CODEX_SANDBOX_MODE,

@@ -42,15 +42,38 @@ function openWorkflow(kernel, { review = false } = {}) {
 }
 
 // The one interruption primitive the WorkerHost uses when an attempt dies.
-function killLatestAttempt(kernel, taskId) {
+function killLatestAttempt(kernel, taskId, reason = "WORKER_TIMEOUT") {
   const run = kernel.workerRuns({ taskId }).at(-1);
   kernel.interruptWorkerRun({
     workerRunId: run.id,
     generation: run.generation,
-    reason: "WORKER_TIMEOUT",
+    reason,
   });
   return run;
 }
+
+test("WORKER_EXECUTION_FAILED uses the same three-attempt continuation and Founder Attention boundary", () => {
+  const { kernel, cleanup } = openTempKernel();
+  try {
+    const flow = openWorkflow(kernel);
+    const driver = createContinuationDriver({ kernel, observe: false });
+    for (let attempt = 0; attempt < MAX_AUTONOMOUS_ATTEMPTS_PER_TASK; attempt += 1) {
+      killLatestAttempt(kernel, flow.task.id, "WORKER_EXECUTION_FAILED");
+      driver.driveWork(flow.work.id, { triggerType: "EXPLICIT" });
+    }
+    const runs = kernel.workerRuns({ taskId: flow.task.id });
+    assert.equal(runs.length, 3);
+    assert.ok(runs.every((run) => run.endReason === "WORKER_EXECUTION_FAILED"));
+    assert.equal(kernel.task(flow.task.id).state, "INTERRUPTED");
+    assert.equal(kernel.workProjection(flow.work.id).founderAttention.item.kind, ATTENTION_KINDS.EXECUTION_INTERRUPTED);
+    assert.equal(kernel.workProjection(flow.work.id).founderAttention.item.evidence.interruptedTasks[0].automaticRetryExhausted, true);
+    driver.driveWork(flow.work.id, { triggerType: "EXPLICIT" });
+    assert.equal(kernel.workerRuns({ taskId: flow.task.id }).length, 3, "no fourth autonomous attempt");
+  } finally {
+    kernel.close();
+    cleanup();
+  }
+});
 
 test("the frozen budget is one initial attempt plus two automatic retries", () => {
   assert.equal(MAX_AUTONOMOUS_ATTEMPTS_PER_TASK, 3);

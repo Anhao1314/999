@@ -2,7 +2,7 @@
 // Contract: docs/contracts/worker-harness-v0.md §2, §17.
 //
 //   manifest()
-//   start(input, context)
+//   start(input, context) // context may carry a Host-owned authorizedToolSession
 //   events(handle)
 //   wait(handle, { timeoutMs })
 //   cancel(handle, reason)
