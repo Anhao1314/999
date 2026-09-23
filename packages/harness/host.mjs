@@ -53,6 +53,7 @@ export function createWorkerHost({
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
   requestedPolicy = defaultRequestedPolicy(),
   toolPolicy = null,
+  artifactPostcondition = null,
   now = () => new Date().toISOString(),
 } = {}) {
   if (!kernel) throw new Error("createWorkerHost requires a kernel");
@@ -62,6 +63,8 @@ export function createWorkerHost({
   if (!runtimeRoot) throw new Error("createWorkerHost requires a runtimeRoot");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1)
     throw new Error("timeoutMs must be a positive integer");
+  if (artifactPostcondition !== null && typeof artifactPostcondition !== "function")
+    throw new Error("artifactPostcondition must be a function");
   const configuredToolElapsedMs = toolPolicy?.budget?.maxElapsedMs ?? timeoutMs;
   const toolBudget = toolPolicy
     ? createToolBudget({
@@ -455,6 +458,28 @@ export function createWorkerHost({
         return;
       }
       const proposed = result.proposedArtifacts[0];
+      if (artifactPostcondition) {
+        let check;
+        try {
+          check = await artifactPostcondition({
+            run,
+            result,
+            proposedArtifact: proposed,
+            observedSources: Object.freeze([...(authorizedToolSession?.snapshot().sources ?? [])]),
+          });
+        } catch {
+          await interrupt("WORKER_OUTPUT_REJECTED", "artifact postcondition failed", {
+            failureCode: "ARTIFACT_POSTCONDITION_FAILED",
+          });
+          return;
+        }
+        if (!check || check.ok !== true) {
+          await interrupt("WORKER_OUTPUT_REJECTED", "artifact postcondition rejected the output", {
+            failureCode: typeof check?.code === "string" ? check.code : "ARTIFACT_POSTCONDITION_FAILED",
+          });
+          return;
+        }
+      }
       const artifact = {
         kind: proposed.kind,
         title: proposed.title,
