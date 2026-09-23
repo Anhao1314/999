@@ -12,7 +12,7 @@ import { REVIEW_VERDICT_VALUES } from "../workforce/reviews.mjs";
 
 export const WORKER_RESULT_VERSION = 1;
 export const WORKER_REVIEW_RESULT_VERSION = 1;
-export const HARNESS_EVIDENCE_VERSION = 1;
+export const HARNESS_EVIDENCE_VERSION = 2;
 export const WORKER_RESULT_OUTCOMES = Object.freeze(["SUCCEEDED", "FAILED"]);
 export const WORKER_REVIEW_VERDICTS = Object.freeze([...REVIEW_VERDICT_VALUES]);
 
@@ -243,7 +243,17 @@ export function buildHarnessEvidence({
   reportedVerification = null,
   containment,
   observedAt,
+  toolSessionEvidence = null,
+  adapterExecution = null,
+  resultDigest = null,
+  failureCode = null,
 }) {
+  if (failureCode !== null && (typeof failureCode !== "string" || !/^[A-Z][A-Z0-9_]{0,79}$/.test(failureCode)))
+    throw new Error("Harness failureCode must be a bounded code");
+  if (toolSessionEvidence && (
+    !Array.isArray(toolSessionEvidence.receipts) || toolSessionEvidence.receipts.length > 33 ||
+    Buffer.byteLength(JSON.stringify(toolSessionEvidence)) > 16 * 1024
+  )) throw new Error("tool session evidence must be bounded");
   const eventKinds = Object.freeze(
     [...new Set(events.map((event) => event.kind))].sort().slice(0, HARNESS_BOUNDS.eventKindsMax),
   );
@@ -269,6 +279,36 @@ export function buildHarnessEvidence({
       scratchRoot: containment.scratchRoot,
       knownLimitations: Object.freeze([...(containment.knownLimitations ?? [])]),
     }),
+    // Tool receipts are Host observations; model identity and step count are
+    // bounded Adapter reports. Neither includes prompt or raw tool output.
+    toolSession: toolSessionEvidence
+      ? Object.freeze({
+          grantDigest: toolSessionEvidence.grantDigest,
+          skillId: toolSessionEvidence.skillId,
+          skillVersion: toolSessionEvidence.skillVersion,
+          budget: Object.freeze({
+            maxToolCalls: toolSessionEvidence.budget.maxToolCalls,
+            maxCallsByCapability: Object.freeze({ ...toolSessionEvidence.budget.maxCallsByCapability }),
+            maxElapsedMs: toolSessionEvidence.budget.maxElapsedMs,
+            toolTimeoutMs: toolSessionEvidence.budget.toolTimeoutMs,
+          }),
+          receipts: Object.freeze(toolSessionEvidence.receipts.map((receipt) => Object.freeze({ ...receipt }))),
+        })
+      : null,
+    modelExecution: adapterExecution
+      ? Object.freeze({
+          backendType: adapterExecution.modelBackendType,
+          backendVersion: adapterExecution.modelBackendVersion,
+          skillId: adapterExecution.skillId,
+          skillVersion: adapterExecution.skillVersion,
+          modelSteps: adapterExecution.modelSteps,
+          inputDigest: adapterExecution.inputDigest,
+          outputDigest: adapterExecution.outputDigest,
+          durationMs: adapterExecution.durationMs,
+        })
+      : null,
+    resultDigest,
+    failureCode,
     observedAt,
   });
   return Object.freeze({ ...payload, evidenceDigest: harnessEvidenceDigest(payload) });
@@ -295,6 +335,9 @@ export function harnessEvidenceDigest(evidence) {
         scratchRoot: evidence.containment.scratchRoot,
         knownLimitations: [...evidence.containment.knownLimitations],
       },
+      toolSession: evidence.toolSession,
+      modelExecution: evidence.modelExecution,
+      ...(evidence.evidenceVersion >= 2 ? { resultDigest: evidence.resultDigest, failureCode: evidence.failureCode } : {}),
       observedAt: evidence.observedAt,
     }),
   );

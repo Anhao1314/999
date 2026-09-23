@@ -12,6 +12,7 @@
 // submitWorkerResult, submitWorkerReviewResult and interruptWorkerRun — and
 // every one of them derives its own lineage from the WorkerRun.
 import { assertAdapterManifest, assertWorkerAdapter, normalizeAdapterResult } from "./adapter.mjs";
+import { createAuthorizedToolSession, createToolBudget, createToolGrant } from "./tool-session.mjs";
 import { ensureRunWorkspace, leaseStateForRun, runWorkspaceLayout } from "./execution-binding.mjs";
 import { normalizeWorkerEvent } from "./events.mjs";
 import {
@@ -51,6 +52,7 @@ export function createWorkerHost({
   runtimeRoot,
   timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
   requestedPolicy = defaultRequestedPolicy(),
+  toolPolicy = null,
   now = () => new Date().toISOString(),
 } = {}) {
   if (!kernel) throw new Error("createWorkerHost requires a kernel");
@@ -60,9 +62,32 @@ export function createWorkerHost({
   if (!runtimeRoot) throw new Error("createWorkerHost requires a runtimeRoot");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1)
     throw new Error("timeoutMs must be a positive integer");
+  const configuredToolElapsedMs = toolPolicy?.budget?.maxElapsedMs ?? timeoutMs;
+  const toolBudget = toolPolicy
+    ? createToolBudget({
+        ...(toolPolicy.budget ?? {}),
+        maxElapsedMs: configuredToolElapsedMs,
+        toolTimeoutMs: toolPolicy.budget?.toolTimeoutMs ?? Math.min(configuredToolElapsedMs, 10_000),
+      })
+    : null;
+  if (toolBudget && toolBudget.maxElapsedMs > timeoutMs)
+    throw new Error("ToolBudget maxElapsedMs cannot exceed WorkerHost timeoutMs");
+  const trustedToolPolicy = toolPolicy
+    ? Object.freeze({
+        skill: Object.freeze({
+          skillId: toolPolicy.skill?.skillId,
+          version: toolPolicy.skill?.version,
+          requiredCapabilities: Object.freeze([...(toolPolicy.skill?.requiredCapabilities ?? [])]),
+          allowedToolCapabilities: Object.freeze([...(toolPolicy.skill?.allowedToolCapabilities ?? [])]),
+        }),
+        approvedCapabilities: Object.freeze([...(toolPolicy.approvedCapabilities ?? [])]),
+        actuators: Object.freeze([...(toolPolicy.actuators ?? [])]),
+      })
+    : null;
 
   const inFlight = new Map();
   const handles = new Map();
+  const sessions = new Map();
   const reports = [];
   let observing = false;
   let stopped = false;
@@ -188,6 +213,28 @@ export function createWorkerHost({
       resultContract,
     });
 
+    // A static, trusted policy is supplied by the Host composition. Neither
+    // WorkPacket capabilities nor the Adapter can create a ToolGrant.
+    let authorizedToolSession = null;
+    if (trustedToolPolicy) {
+      try {
+        const grant = createToolGrant({
+          run,
+          skill: trustedToolPolicy.skill,
+          approvedCapabilities: trustedToolPolicy.approvedCapabilities,
+          actuators: trustedToolPolicy.actuators,
+        });
+        authorizedToolSession = createAuthorizedToolSession({
+          run, grant, budget: toolBudget, actuators: trustedToolPolicy.actuators,
+        });
+        sessions.set(run.id, authorizedToolSession);
+      } catch (error) {
+        kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason: "WORKER_EXECUTION_FAILED" });
+        report(run.id, run.generation, HOST_STATUS.INTERRUPTED, { reason: "WORKER_EXECUTION_FAILED", detail: "tool policy setup failed" });
+        return;
+      }
+    }
+
     let handle = null;
     try {
       handle = await adapter.start(input, {
@@ -195,15 +242,18 @@ export function createWorkerHost({
         workspaceRoot: layout.workspaceRoot,
         scratchRoot: layout.scratchRoot,
         effectiveExecutionPolicy: effectivePolicy,
+        ...(authorizedToolSession ? { authorizedToolSession } : {}),
       });
     } catch (error) {
+      authorizedToolSession?.cancel();
+      sessions.delete(run.id);
       kernel.interruptWorkerRun({
         workerRunId: run.id,
         generation: run.generation,
-        reason: "WORKER_PROCESS_EXIT",
+        reason: authorizedToolSession ? "WORKER_EXECUTION_FAILED" : "WORKER_PROCESS_EXIT",
       });
       report(run.id, run.generation, HOST_STATUS.START_FAILED, {
-        detail: error?.message ?? String(error),
+        detail: authorizedToolSession ? "generic worker start failed" : error?.message ?? String(error),
       });
       return;
     }
@@ -216,6 +266,8 @@ export function createWorkerHost({
     // handle is registered before this check and the check precedes the next
     // await, so neither order can leave an attempt unclaimed.
     if (stopped) {
+      authorizedToolSession?.cancel();
+      sessions.delete(run.id);
       await safeCancel(handle, "HOST_STOPPING");
       report(run.id, run.generation, HOST_STATUS.CANCELLED, { reason: "HOST_STOPPING" });
       return;
@@ -223,6 +275,7 @@ export function createWorkerHost({
 
     const observed = [];
     let eventsError = null;
+    let lastAdapterMeta = null;
     const drain = (async () => {
       try {
         for await (const raw of adapter.events(handle)) {
@@ -236,10 +289,29 @@ export function createWorkerHost({
     // One report shape for every interrupted attempt: the Runtime records the
     // fact, the Host says what it observed. Nothing is written on the way.
     const interrupt = async (reason, detail = null, extra = null) => {
+      authorizedToolSession?.cancel();
       await safeCancel(handle, reason);
       kernel.interruptWorkerRun({ workerRunId: run.id, generation: run.generation, reason });
       await drain.catch(() => {});
-      report(run.id, run.generation, HOST_STATUS.INTERRUPTED, { reason, detail, ...(extra ?? {}) });
+      const proposedCode = extra?.failureCode ?? extra?.failureReason ?? reason;
+      const failureCode = typeof proposedCode === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(proposedCode)
+        ? proposedCode : reason;
+      const evidence = buildHarnessEvidence({
+        run,
+        processOutcome: "INTERRUPTED",
+        events: observed,
+        resultParse: reason === "WORKER_OUTPUT_REJECTED" ? "PARSED_REJECTED" : "NOT_DELIVERED",
+        containment: effectivePolicy,
+        observedAt: now(),
+        toolSessionEvidence: authorizedToolSession?.snapshot() ?? null,
+        adapterExecution: lastAdapterMeta?.modelBackendType ? lastAdapterMeta : null,
+        failureCode,
+      });
+      report(run.id, run.generation, HOST_STATUS.INTERRUPTED, {
+        reason, detail, ...(extra ?? {}),
+        evidenceDigest: evidence.evidenceDigest,
+        evidence,
+      });
     };
 
     // An invalid candidate is never delivered and never patched up: the attempt
@@ -260,6 +332,7 @@ export function createWorkerHost({
       }
 
       const adapterResult = settled.result;
+      lastAdapterMeta = adapterResult.adapterMeta;
       if (adapterResult.terminalStatus === "CANCELLED") {
         // A cancelled execution writes nothing: an attempt nobody reported on
         // stays RUNNING in Runtime truth, and recovery owns its resolution.
@@ -268,15 +341,18 @@ export function createWorkerHost({
         return;
       }
       if (adapterResult.terminalStatus === "FAILED") {
-        // Three different facts, three different reasons. `PROCESS_EXIT` is the
-        // one failure the adapter itself certifies; a Harness postcondition
-        // rejection explains a delivery that was refused even though a
-        // protocol-valid candidate existed (the specific postcondition stays in
-        // the report detail and in HarnessEvidence); anything else is the
-        // adapter telling us the execution protocol broke.
+        // Preserve the distinction between a process exit, an elapsed budget,
+        // a non-process execution failure, an independent postcondition
+        // rejection, and a malformed execution protocol.
         const failureReason = adapterResult.failureReason ?? null;
         if (failureReason === "PROCESS_EXIT") {
           await interrupt("WORKER_PROCESS_EXIT", adapterResult.reason ?? failureReason);
+        } else if (failureReason === "TIMEOUT") {
+          await interrupt("WORKER_TIMEOUT", adapterResult.reason ?? failureReason);
+        } else if (failureReason === "EXECUTION_FAILED") {
+          await interrupt("WORKER_EXECUTION_FAILED", adapterResult.reason ?? failureReason, {
+            failureCode: adapterResult.adapterMeta?.failureCode ?? null,
+          });
         } else if (HARNESS_REJECTION_REASONS.includes(failureReason)) {
           await interrupt("WORKER_OUTPUT_REJECTED", adapterResult.reason ?? failureReason, {
             failureReason,
@@ -311,6 +387,7 @@ export function createWorkerHost({
         }
 
         await drain.catch(() => {});
+        const resultDigest = workerReviewResultDigest(judgment);
         const evidence = buildHarnessEvidence({
           run,
           processOutcome: "SUCCEEDED",
@@ -319,13 +396,16 @@ export function createWorkerHost({
           reportedVerification: null,
           containment: effectivePolicy,
           observedAt: now(),
+          toolSessionEvidence: authorizedToolSession?.snapshot() ?? null,
+          adapterExecution: adapterResult.adapterMeta?.modelBackendType ? adapterResult.adapterMeta : null,
+          resultDigest,
         });
 
         try {
           const delivered = kernel.submitWorkerReviewResult({
             workerRunId: run.id,
             generation: run.generation,
-            resultDigest: workerReviewResultDigest(judgment),
+            resultDigest,
             evidenceDigest: evidence.evidenceDigest,
             verdict: judgment.verdict,
             findings: judgment.findings,
@@ -355,12 +435,10 @@ export function createWorkerHost({
       }
       const result = parsed.result;
 
-      // A validated result that reports failure is an attempt that ended
-      // without a deliverable output. The interruption vocabulary has no
-      // dedicated worker-reported-failure reason yet (remaining gap), so the
-      // closest truthful mapping is the attempt's process ending.
+      // A validated result that reports failure is an execution without a
+      // deliverable output, not evidence of a process exit.
       if (result.outcome !== "SUCCEEDED") {
-        await interrupt("WORKER_PROCESS_EXIT", "the Worker reported FAILED rather than a successful result");
+        await interrupt("WORKER_EXECUTION_FAILED", "the Worker reported FAILED rather than a successful result");
         return;
       }
 
@@ -382,6 +460,7 @@ export function createWorkerHost({
       };
 
       await drain.catch(() => {});
+      const resultDigest = workerResultDigest(result);
       const evidence = buildHarnessEvidence({
         run,
         processOutcome: "SUCCEEDED",
@@ -390,13 +469,16 @@ export function createWorkerHost({
         reportedVerification: result.reportedVerification,
         containment: effectivePolicy,
         observedAt: now(),
+        toolSessionEvidence: authorizedToolSession?.snapshot() ?? null,
+        adapterExecution: adapterResult.adapterMeta?.modelBackendType ? adapterResult.adapterMeta : null,
+        resultDigest,
       });
 
       try {
         const delivered = kernel.submitWorkerResult({
           workerRunId: run.id,
           generation: run.generation,
-          resultDigest: workerResultDigest(result),
+          resultDigest,
           evidenceDigest: evidence.evidenceDigest,
           artifact,
           verificationSummary: result.reportedVerification,
@@ -417,6 +499,8 @@ export function createWorkerHost({
       }
     } finally {
       handles.delete(run.id);
+      authorizedToolSession?.cancel();
+      sessions.delete(run.id);
     }
   }
 
@@ -466,6 +550,7 @@ export function createWorkerHost({
       // in parallel, and waits for each adapter to confirm that its child is
       // gone. A stopping Host therefore leaves no execution running behind it,
       // and the Desktop never has to look for processes to kill.
+      for (const session of sessions.values()) session.cancel();
       await Promise.all([...handles.values()].map((handle) => safeCancel(handle, "HOST_STOPPING")));
       await this.idle();
     },
