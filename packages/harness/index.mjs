@@ -53,6 +53,10 @@ export { DEFAULT_WAIT_TIMEOUT_MS, HOST_STATUS, createWorkerHost } from "./host.m
 export { assertActuator, createAuthorizedToolSession, createToolBudget, createToolGrant, ToolSessionError } from "./tool-session.mjs";
 export { assertModelBackend, createTestModelBackend } from "./model-backend.mjs";
 export { createFakeActuator } from "./adapters/fake-actuator.mjs";
+export { assertSearchProvider } from "./search-provider.mjs";
+export { WEB_LIMITS, isPublicIp, parsePublicWebUrl, resolveDns, resolvePublicWebUrl } from "./web-network-policy.mjs";
+export { createWebReader } from "./web-reader.mjs";
+export { WEB_READ, WEB_SEARCH, createWebResearchActuator } from "./adapters/web-research-actuator.mjs";
 export {
   GENERIC_MODEL_WORKER_ADAPTER_TYPE,
   GENERIC_MODEL_WORKER_ADAPTER_VERSION,
