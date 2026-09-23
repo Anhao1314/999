@@ -252,7 +252,8 @@ export function buildHarnessEvidence({
     throw new Error("Harness failureCode must be a bounded code");
   if (toolSessionEvidence && (
     !Array.isArray(toolSessionEvidence.receipts) || toolSessionEvidence.receipts.length > 33 ||
-    Buffer.byteLength(JSON.stringify(toolSessionEvidence)) > 16 * 1024
+    (toolSessionEvidence.sources !== undefined && (!Array.isArray(toolSessionEvidence.sources) || toolSessionEvidence.sources.length > 32)) ||
+    Buffer.byteLength(JSON.stringify(toolSessionEvidence)) > 32 * 1024
   )) throw new Error("tool session evidence must be bounded");
   const eventKinds = Object.freeze(
     [...new Set(events.map((event) => event.kind))].sort().slice(0, HARNESS_BOUNDS.eventKindsMax),
@@ -293,6 +294,9 @@ export function buildHarnessEvidence({
             toolTimeoutMs: toolSessionEvidence.budget.toolTimeoutMs,
           }),
           receipts: Object.freeze(toolSessionEvidence.receipts.map((receipt) => Object.freeze({ ...receipt }))),
+          ...(toolSessionEvidence.sources !== undefined
+            ? { sources: Object.freeze(toolSessionEvidence.sources.map((source) => Object.freeze({ ...source }))) }
+            : {}),
         })
       : null,
     modelExecution: adapterExecution

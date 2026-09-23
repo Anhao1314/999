@@ -348,7 +348,9 @@ export function createWorkerHost({
         if (failureReason === "PROCESS_EXIT") {
           await interrupt("WORKER_PROCESS_EXIT", adapterResult.reason ?? failureReason);
         } else if (failureReason === "TIMEOUT") {
-          await interrupt("WORKER_TIMEOUT", adapterResult.reason ?? failureReason);
+          await interrupt("WORKER_TIMEOUT", adapterResult.reason ?? failureReason, {
+            failureCode: adapterResult.adapterMeta?.failureCode ?? "WORKER_TIMEOUT",
+          });
         } else if (failureReason === "EXECUTION_FAILED") {
           await interrupt("WORKER_EXECUTION_FAILED", adapterResult.reason ?? failureReason, {
             failureCode: adapterResult.adapterMeta?.failureCode ?? null,
@@ -358,7 +360,9 @@ export function createWorkerHost({
             failureReason,
           });
         } else {
-          await interrupt("WORKER_PROTOCOL_ERROR", adapterResult.reason ?? failureReason);
+          await interrupt("WORKER_PROTOCOL_ERROR", adapterResult.reason ?? failureReason, {
+            failureCode: adapterResult.adapterMeta?.failureCode ?? "WORKER_PROTOCOL_ERROR",
+          });
         }
         return;
       }

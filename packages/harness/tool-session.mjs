@@ -2,6 +2,7 @@
 // Organizational capabilities establish eligibility; only the explicit
 // approvedCapabilities input can grant an execution tool.
 import { digestOf } from "../work/records.mjs";
+import { randomUUID } from "node:crypto";
 
 const MAX_TOOL_CALLS = 32;
 const MAX_TOOL_INPUT_BYTES = 8 * 1024;
@@ -18,6 +19,25 @@ export class ToolSessionError extends Error {
 
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+
+function sourceOutput(output) {
+  const observation = output?.sourceObservation;
+  if (!plain(output) || Object.keys(output).length !== 1 || !plain(observation) ||
+      Object.keys(observation).some((key) => !["canonicalUrl", "title", "observedAt", "contentDigest", "content"].includes(key)) ||
+      typeof observation.canonicalUrl !== "string" || Buffer.byteLength(observation.canonicalUrl) > 2048 ||
+      (observation.title !== null && (typeof observation.title !== "string" || observation.title.length > 200)) ||
+      typeof observation.observedAt !== "string" || observation.observedAt.length > 40 ||
+      !Number.isFinite(Date.parse(observation.observedAt)) ||
+      typeof observation.contentDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(observation.contentDigest) ||
+      typeof observation.content !== "string" || !observation.content ||
+      Buffer.byteLength(observation.content) > 16 * 1024)
+    throw new ToolSessionError("TOOL_OUTPUT_INVALID", "source observation must be bounded and complete");
+  let url;
+  try { url = new URL(observation.canonicalUrl); } catch { /* invalid Actuator output */ }
+  if (!url || !["http:", "https:"].includes(url.protocol) || url.username || url.password)
+    throw new ToolSessionError("TOOL_OUTPUT_INVALID", "source observation URL is invalid");
+  return observation;
+}
 
 function capabilityList(value, field) {
   if (!Array.isArray(value) || value.length > MAX_TOOL_CALLS ||
@@ -88,20 +108,24 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
     throw new Error("ToolGrant does not belong to this WorkerRun generation");
   if (!budget || !Number.isInteger(budget.maxToolCalls)) throw new Error("ToolBudget is required");
   const available = actuators.map(assertActuator);
+  const sourceCapable = available.some((actuator) => Array.isArray(actuator.sourceObservationCapabilities) && actuator.sourceObservationCapabilities.length > 0);
   const controller = new AbortController();
   const startedAt = now();
   const used = new Map();
   const seen = new Set();
   const receipts = [];
+  const sources = [];
+  const issuedSourceIds = new Set();
   let calls = 0;
   let terminalFailure = null;
 
-  const record = ({ callId, capability, status, inputDigest = null, outputDigest = null, durationMs = 0 }) => {
+  const record = ({ callId, capability, status, inputDigest = null, outputDigest = null, durationMs = 0, sourceId = null }) => {
     if (receipts.length >= MAX_TOOL_CALLS + 1) return;
     receipts.push(Object.freeze({
       callId: typeof callId === "string" ? callId.slice(0, 80) : null,
       capability: typeof capability === "string" ? capability.slice(0, 80) : null,
       status, inputDigest, outputDigest, durationMs,
+      ...(sourceId ? { sourceId } : {}),
     }));
   };
   const fail = (code, message, callId = null, capability = null, inputDigest = null) => {
@@ -132,8 +156,8 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
       if (typeof encodedInput !== "string" || Buffer.byteLength(encodedInput) > MAX_TOOL_INPUT_BYTES)
         fail("TOOL_PROTOCOL_ERROR", "tool input is too large", callId, capability);
       const inputDigest = digestOf(encodedInput);
-      const receipt = (status, outputDigest = null, durationMs = 0) => {
-        record({ callId, capability, status, inputDigest, outputDigest, durationMs });
+      const receipt = (status, outputDigest = null, durationMs = 0, sourceId = null) => {
+        record({ callId, capability, status, inputDigest, outputDigest, durationMs, sourceId });
       };
       if (!grant.capabilities.includes(capability)) {
         fail("TOOL_DENIED", "tool capability was not granted", callId, capability, inputDigest);
@@ -157,13 +181,37 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
       signal?.addEventListener("abort", abort, { once: true });
       const timer = setTimeout(abort, Math.min(budget.toolTimeoutMs, remaining));
       try {
-        const output = await actuator.invoke({ capability, input, signal: attempt.signal });
+        let output = await actuator.invoke({ capability, input, signal: attempt.signal });
         if (controller.signal.aborted || signal?.aborted) throw new ToolSessionError("ABORTED", "tool session was cancelled");
         if (attempt.signal.aborted) throw new ToolSessionError("TOOL_TIMEOUT", "tool invocation timed out");
         if (!plain(output) || bytes(output) > MAX_TOOL_OUTPUT_BYTES)
           throw new ToolSessionError("TOOL_OUTPUT_INVALID", "tool output must be a bounded object");
+        let source = null;
+        if (actuator.sourceObservationCapabilities?.includes(capability)) {
+          const observation = sourceOutput(output);
+          let sourceId;
+          do { sourceId = `src_${randomUUID()}`; } while (issuedSourceIds.has(sourceId));
+          output = Object.freeze({ sourceObservation: Object.freeze({ sourceId, ...observation }) });
+          if (bytes(output) > MAX_TOOL_OUTPUT_BYTES)
+            throw new ToolSessionError("TOOL_OUTPUT_INVALID", "source observation exceeds tool output limit");
+          const url = new URL(observation.canonicalUrl);
+          source = Object.freeze({
+            sourceId,
+            receiptCallId: callId,
+            // Origin is safe to expose in bounded Host evidence. The digest
+            // binds the exact URL without persisting path/query secrets.
+            safeUrl: url.origin.slice(0, 120),
+            canonicalUrlDigest: digestOf(observation.canonicalUrl),
+            contentDigest: observation.contentDigest,
+            observedAt: observation.observedAt,
+          });
+        }
         const outputDigest = digestOf(JSON.stringify(output));
-        receipt("SUCCEEDED", outputDigest, now() - began);
+        if (source) {
+          issuedSourceIds.add(source.sourceId);
+          sources.push(source);
+        }
+        receipt("SUCCEEDED", outputDigest, now() - began, source?.sourceId);
         return Object.freeze({ type: "TOOL_RESULT", callId, capability, status: "SUCCEEDED", output });
       } catch (error) {
         const code = controller.signal.aborted || signal?.aborted
@@ -191,6 +239,7 @@ export function createAuthorizedToolSession({ run, grant, budget, actuators = []
         skillVersion: grant.skillVersion,
         budget,
         receipts: Object.freeze([...receipts]),
+        ...(sourceCapable ? { sources: Object.freeze([...sources]) } : {}),
       });
     },
   });

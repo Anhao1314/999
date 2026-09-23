@@ -113,6 +113,7 @@ test("v1 evidence digest stays byte-identical; v2 digest covers result and bound
   };
   const first = buildHarnessEvidence(args);
   assert.equal(first.evidenceVersion, 2);
+  assert.equal(first.toolSession.sources, undefined, "existing non-Web v2 evidence has no source extension");
   assert.equal(first.evidenceDigest, harnessEvidenceDigest(first));
   assert.notEqual(buildHarnessEvidence({ ...args, resultDigest: "sha256:result-b" }).evidenceDigest, first.evidenceDigest);
   assert.notEqual(buildHarnessEvidence({ ...args, failureCode: "PROVIDER_ERROR" }).evidenceDigest, first.evidenceDigest);
