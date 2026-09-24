@@ -457,4 +457,14 @@ body.fc-workspace::before { background: rgba(244,247,251,.62); }
 .fc-sub-split:has(.fc-sub-inspector) .fc-sub-inspector { animation: fc-detail-arrive 180ms cubic-bezier(.2,.82,.22,1); }
 @keyframes fc-detail-arrive { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion:reduce) { .fc-sub-split:has(.fc-sub-inspector) .fc-sub-inspector { animation: none; } }
-@media (min-width:621px) and (max-width:1100px) { .fc-flow { flex-wrap: wrap; overflow: visible; } }
+/* Keep each receipt inside its step. Long artifact titles used to widen their
+   190px parent and paint over the next step in the company canvas. */
+.fc-flow { align-items: stretch; max-width: 100%; min-width: 0; overscroll-behavior-inline: contain; }
+.fc-flow .fc-step { box-sizing: border-box; width: 174px; flex: 0 0 174px; min-width: 0; max-width: none; }
+.fc-flow .fc-arrow { align-self: center; }
+.fc-flow .fc-step-artifacts { box-sizing: border-box; width: 100%; min-width: 0; }
+.fc-flow .fc-artifact-chip { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
+.fc-flow .fc-artifact-title { display: block; width: 100%; min-width: 0; max-width: 100%; }
+@media (max-width: 620px) {
+  .fc-flow .fc-step { width: 100%; flex-basis: auto; }
+}
