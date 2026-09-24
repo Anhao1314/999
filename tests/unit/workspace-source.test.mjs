@@ -22,7 +22,7 @@ test('no Workspace code reads storage or speaks SQL: Experience is the only Runt
 test('the frontend holds no kernel and imports nothing beyond its own module graph', () => {
   for (const name of frontend) {
     for (const [, specifier] of source[name].matchAll(IMPORT_PATTERN))
-      assert.ok(specifier.startsWith('./'), `${name} must not import ${specifier}`);
+      assert.ok(specifier.startsWith('./') || specifier === '/employee-assets/sprite-motion.mjs', `${name} must not import ${specifier}`);
   }
   const server = source['server.mjs'];
   assert.match(server, /export function createWorkspaceRoutes/);
@@ -94,7 +94,8 @@ test('the workforce widget links to the merged Lobby and reuses its assets', () 
   assert.match(app, /'\/employees'/);
   assert.match(app, /\/employee-assets\/assets\/portrait-/);
   assert.match(app, /projection\?\.founderAssistant/);
-  assert.match(app, /\/employee-assets\/assets\/sprite-/);
+  assert.match(app, /\/employee-assets\/sprite-motion\.mjs/);
+  assert.match(source['server.mjs'], /assistant-motion\.mjs/);
   assert.match(source['index.html'], /id="assistant-pet"/);
   assert.match(source['index.html'], /id="assistant-bubble"/);
 });

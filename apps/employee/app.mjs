@@ -13,6 +13,8 @@ import { HttpEmployeeAdapter } from './adapter.mjs';
 import { validatePortrait } from './avatar.mjs';
 import { symbol } from '/employee-assets/icons.mjs';
 import { createSurfaceMotion } from '/employee-assets/surface-motion.mjs';
+import { createSpritePlayer, portraitUrl } from './sprite-motion.mjs';
+import { roomPoint, roomRoute } from './room-path.mjs';
 
 const $ = id => document.getElementById(id);
 const node = (tag, text, className) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (className) n.className = className; return n; };
@@ -70,8 +72,8 @@ const reduced = () => $('reduce-motion').checked || reduceQuery.matches;
 const activeEmployees = () => store.state.employees;
 const selected = () => store.state.employees.find(e => e.employeeId === selectedId);
 const connected = () => store.state.connection === CONNECTION.LIVE;
-const spriteNumber = e => e.sprite ?? (Array.from(e.employeeId).reduce((sum, c) => sum + c.charCodeAt(0), 0) % 8 + 1);
-const preset = e => `/employee-assets/assets/portrait-${spriteNumber(e)}.png`;
+const isAssistant = e => e.capabilities?.includes('founder.assistant') ?? false;
+const preset = e => portraitUrl(e.employeeId, isAssistant(e));
 const portrait = e => portraits.get(`${currentCompany}/${e.employeeId}`) ?? preset(e);
 function toast(text) { $('toast').textContent = text; $('toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.remove('visible'), 5000); }
 function pill(e) {
@@ -227,9 +229,9 @@ $('search').addEventListener('keydown', event => {
   }
 });
 $('reduce-motion').checked = reduceQuery.matches;
-function reduceMotion() { document.body.classList.toggle('fc-reduced', reduced()); if (reduced()) for (const a of animations) a.finish(); }
+function reduceMotion() { document.body.classList.toggle('fc-reduced', reduced()); if (reduced()) for (const a of animations) a.finish(); for (const visual of visuals.values()) visual.player?.update(); }
 $('reduce-motion').onchange = reduceMotion; reduceQuery.addEventListener('change', reduceMotion); reduceMotion();
-document.addEventListener('visibilitychange', () => { document.body.classList.toggle('fc-hidden', document.hidden); for (const a of animations) document.hidden ? a.pause() : a.play(); });
+document.addEventListener('visibilitychange', () => { document.body.classList.toggle('fc-hidden', document.hidden); for (const a of animations) document.hidden ? a.pause() : a.play(); for (const visual of visuals.values()) visual.player?.update(); });
 
 function rosterMatch(e) {
   const filter = $('filter').querySelector('input:checked')?.value ?? 'all';
@@ -312,6 +314,7 @@ function renderLobby(state) {
   if (companyChanged) {
     closeRoomFocus(false);
     for (const a of animations) a.cancel();
+    for (const visual of visuals.values()) { visual.player?.destroy(); visual.routeAnimation?.cancel(); clearTimeout(visual.talkTimer); }
     animations.clear(); visuals.clear(); $('rooms').replaceChildren();
     initialized = false; lastCompany = state.companyId; seenMessages.clear();
   }
@@ -327,13 +330,14 @@ function renderLobby(state) {
     const roomIcons = { founder: 'workspace', research: 'knowledge', design: 'artifacts', engineering: 'settings', delivery: 'work', collaboration: 'employees' };
     entry.append(symbol(roomIcons[room.id]), name, count);
     const stage = node('div', undefined, 'fc-room-stage');
+    const compact = node('div', undefined, 'fc-room-compact-list');
     const extra = node('span', undefined, 'fc-room-extra');
-    section.append(entry, stage, extra);
+    section.append(entry, stage, compact, extra);
     $('rooms').append(section);
   }
   const visibleIds = new Set(state.rooms.flatMap((room) => room.seats.filter(Boolean).slice(0, 4)));
   for (const [id, visual] of visuals) if (!visibleIds.has(id)) {
-    visual.animation?.cancel(); visual.el.remove(); clearTimeout(visual.talkTimer); visuals.delete(id);
+    visual.animation?.cancel(); visual.routeAnimation?.cancel(); visual.player.destroy(); visual.el.remove(); clearTimeout(visual.talkTimer); visuals.delete(id);
   }
   for (const room of state.rooms) {
     const section = roomElement(room.id);
@@ -344,7 +348,19 @@ function renderLobby(state) {
     const extra = section.querySelector('.fc-room-extra');
     extra.textContent = ids.length > 4 ? `另有 ${ids.length - 4} 位 · 点击区域查看` : ids.length ? '点击区域查看全部成员' : '预留办公空间';
     const stage = section.querySelector('.fc-room-stage');
-    for (const id of ids.slice(0, 4)) {
+    const compact = section.querySelector('.fc-room-compact-list');
+    const compactSignature = JSON.stringify(ids.map((id) => {
+      const employee = state.employees.find((entry) => entry.employeeId === id);
+      return [id, employee?.displayName, employee?.availability];
+    }));
+    if (compact.dataset.signature !== compactSignature) {
+      compact.dataset.signature = compactSignature;
+      compact.replaceChildren(...ids.map((id) => {
+        const employee = state.employees.find((entry) => entry.employeeId === id);
+        return button(`${employee?.displayName ?? '员工'} · ${availabilityNames[employee?.availability] ?? '状态未知'}`, () => openCard(id), 'fc-room-compact-person');
+      }));
+    }
+    for (const [slot, id] of ids.slice(0, 4).entries()) {
       const person = state.employees.find((entry) => entry.employeeId === id);
       if (!person) continue;
       let visual = visuals.get(id);
@@ -353,31 +369,51 @@ function renderLobby(state) {
         const sprite = node('span', undefined, 'fc-sprite');
         const label = node('span', undefined, 'fc-person-label');
         el.dataset.employeeId = id;
-        sprite.style.backgroundImage = `url('/employee-assets/assets/sprite-${spriteNumber(person)}.png')`;
         el.append(sprite, label);
         stage.append(el);
-        visual = { el, label };
+        const working = isWorking(person);
+        const point = roomPoint(slot, working);
+        el.style.left = `${point.x}%`; el.style.top = `${point.y}%`;
+        visual = { el, label, slot, working, player: createSpritePlayer(sprite, { employeeId: id, assistant: isAssistant(person), reduced }) };
+        el.addEventListener('focus', () => visual.routeAnimation?.finish());
         visuals.set(id, visual);
-        if (initialized && connected() && !reduced()) {
-          const animation = el.animate([{ opacity: 0, transform: 'translateY(12px)' }, { opacity: 1, transform: 'translateY(0)' }], { duration: 360, easing: 'cubic-bezier(.2,.82,.22,1)' });
-          visual.animation = animation;
-          animations.add(animation);
-          animation.onfinish = animation.oncancel = () => { animations.delete(animation); visual.animation = null; };
-        }
       } else if (visual.el.parentElement !== stage) stage.append(visual.el);
+      const working = isWorking(person);
+      if (visual.slot !== slot) { visual.slot = slot; visual.working = working; visual.routeAnimation?.cancel(); const point = roomPoint(slot, working); visual.el.style.left = `${point.x}%`; visual.el.style.top = `${point.y}%`; }
+      else if (person.availability === AVAILABILITY.DISABLED && visual.working) {
+        visual.routeAnimation?.cancel(); visual.working = false;
+        const point = roomPoint(slot, false); visual.el.style.left = `${point.x}%`; visual.el.style.top = `${point.y}%`;
+      }
+      else if (visual.working !== working && connected() && initialized) {
+        visual.routeAnimation?.finish();
+        const route = roomRoute(slot, visual.working, working);
+        visual.working = working;
+        const destination = route.at(-1);
+        visual.el.style.left = `${destination.x}%`; visual.el.style.top = `${destination.y}%`;
+        if (!reduced() && !document.hidden && !visual.el.matches(':focus')) {
+          const animation = visual.el.animate(route.map((point) => ({ left: `${point.x}%`, top: `${point.y}%` })), { duration: 620, easing: 'linear' });
+          visual.routeAnimation = animation; animations.add(animation);
+          visual.player.setDirection(working ? (slot % 2 ? 'right' : 'left') : 'front');
+          visual.player.play('walk');
+          animation.onfinish = animation.oncancel = () => { animations.delete(animation); visual.routeAnimation = null; visual.player.setDirection('front'); visual.player.setBase(visual.workAction ?? 'idle'); };
+        }
+      } else if (!connected()) { visual.routeAnimation?.finish(); visual.player.setEnabled(false); }
+      else visual.player.setEnabled(true);
       visual.label.textContent = person.displayName;
       const role = currentRoleOf(person);
       visual.el.dataset.status = person.availability;
       visual.el.dataset.role = role ?? '';
       visual.el.dataset.condition = needsFounderCheck(person) ? 'check' : '';
       visual.el.setAttribute('aria-label', `${person.displayName}，${person.position?.title ?? '未设置岗位'}，${availabilityNames[person.availability] ?? person.availability}${isWorking(person) && role ? `，${roleNames[role]}` : ''}${needsFounderCheck(person) ? '，执行状态需要检查' : ''}`);
-      if (!visual.talking || !connected()) visual.el.dataset.action = visualAction(state, person);
+      const action = visualAction(state, person);
+      visual.workAction = action === 'typing' ? (role === 'REVIEW' ? 'read' : 'type') : 'idle';
+      if (!visual.routeAnimation && !visual.talking) visual.player.setBase(visual.workAction);
       if (!connected()) { visual.animation?.finish(); clearTimeout(visual.talkTimer); visual.talking = false; }
     }
   }
   if (initialized && connected() && state.source === 'mock') for (const event of state.activity ?? []) if (event.kind === 'message.sent' && !seenMessages.has(event.id)) {
     seenMessages.add(event.id);
-    for (const id of [event.employeeId, event.toEmployeeId]) { const v = visuals.get(id); if (!v) continue; clearTimeout(v.talkTimer); v.talking = true; v.el.dataset.action = 'talking'; v.talkTimer = setTimeout(() => { v.talking = false; const e = store.state.employees.find(entry => entry.employeeId === id); if (e) v.el.dataset.action = visualAction(store.state, e); }, 3000); }
+    for (const id of [event.employeeId, event.toEmployeeId]) { const v = visuals.get(id); if (!v) continue; clearTimeout(v.talkTimer); v.talking = true; v.player.play('wave'); v.talkTimer = setTimeout(() => { v.talking = false; v.player.setBase(v.workAction ?? 'idle'); }, 3000); }
   }
   if (!initialized) for (const event of state.activity ?? []) seenMessages.add(event.id);
   renderRoomFocus(state);

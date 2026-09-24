@@ -1,6 +1,6 @@
 {
   "name": "relay-code-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "productName": "Relay Code",
   "description": "Relay Code desktop shell for the FlowCredit Runtime.",

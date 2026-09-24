@@ -119,6 +119,16 @@
 @media (max-width: 620px) { .fc-employee .fc-scene { padding: 15px; } .fc-floor-rooms { grid-template-columns: minmax(0,1fr); gap: 16px; } .fc-floor-room { min-height: 225px; } .fc-floor-corridor { display: none; } .fc-room-focus { top: 12px; right: 8px; max-height: min(440px,calc(100vh - 24px)); width: calc(100vw - 16px); } }
 @media (prefers-reduced-motion: reduce) { .fc-floor-room, .fc-room-focus { animation: none; transition: none; } }
 @media (prefers-reduced-transparency: reduce) { .fc-employee .fc-top, .fc-employee .fc-lobby-panel, .fc-employee dialog, .fc-room-focus { backdrop-filter: none; background: #f8fbff; } }
+.fc-employee .fc-room-stage { position: relative; display: block; min-height: 173px; width: 100%; }
+.fc-employee .fc-floor-room button.fc-person { position: absolute; width: 70px; height: 80px; transform: translate(-50%,-50%); margin: 0; padding: 0; }
+.fc-employee .fc-floor-room .fc-sprite { width: 48px; height: 72px; animation: none; }
+.fc-room-compact-list { display: none; }
+@media (max-width: 620px) {
+  .fc-employee .fc-room-stage { display: none; }
+  .fc-room-compact-list { display: grid; gap: 6px; margin: 8px 2px; }
+  .fc-employee .fc-room-compact-person { width: 100%; padding: 8px 10px; text-align: left; background: rgba(255,255,255,.83); font-size: 12px; }
+  .fc-floor-room { min-height: 0; }
+}
 .fc-employee.fc-reduced .fc-floor-room { transition: none; transform: none; }
 .fc-employee.fc-reduced .fc-room-focus { animation: fc-room-focus-fade 110ms linear both !important; transition: none; }
 @keyframes fc-room-focus-fade { from { opacity: 0; } to { opacity: 1; } }

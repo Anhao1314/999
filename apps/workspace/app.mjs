@@ -39,6 +39,8 @@ import { symbol } from './icons.mjs';
 import { companyStageModel } from './company-stage.mjs';
 import { capabilityText } from './company-hiring-domain.mjs';
 import { createSurfaceMotion, surfaceOrigin } from './surface-motion.mjs';
+import { createSpritePlayer } from '/employee-assets/sprite-motion.mjs';
+import { createAssistantMotionTracker } from './assistant-motion.mjs';
 
 const $ = (id) => document.getElementById(id);
 const node = (tag, className, text) => {
@@ -67,7 +69,9 @@ const spriteNumber = (employeeId) =>
   (Array.from(String(employeeId)).reduce((sum, character) => sum + character.charCodeAt(0), 0) % 8) + 1;
 const avatar = (employeeId) => {
   const image = node('img', 'fc-avatar');
-  image.src = `/employee-assets/assets/portrait-${spriteNumber(employeeId)}.png`;
+  image.src = employeeId === store.state.projection?.founderAssistant?.employeeId
+    ? '/employee-assets/assets/portrait-assistant.png'
+    : `/employee-assets/assets/portrait-${spriteNumber(employeeId)}.png`;
   image.alt = '';
   image.loading = 'lazy';
   return image;
@@ -166,6 +170,9 @@ let popoverMotionEpoch = 0;
 let popoverClosing = false;
 let boardClickTimer = null;
 let assistantClickTimer = null;
+const assistantSignals = createAssistantMotionTracker();
+let assistantPlayer = null, assistantIdentity = null, assistantWasVisible = false, assistantWalkTimer = null;
+let assistantLastInteraction = Date.now();
 let assistantBubbleEpoch = 0;
 let boardDrag = null;
 let boardDetailReturnFocus = null;
@@ -1360,17 +1367,49 @@ function renderAssistant(state) {
   const pet = $('assistant-pet');
   const assistant = state.projection?.founderAssistant;
   const visible = view.nav === 'workspace' && !view.presentation && !!assistant;
+  const live = freshness(state) === 'LIVE';
+  const event = assistantSignals.observe({
+    companyId: state.projection?.company?.id,
+    live: live && !!assistant,
+    attentionIds: state.projection?.attention?.items?.map((item) => item.id) ?? [],
+    deliveryIds: state.projection?.recentDeliveries?.map((item) => item.artifactId) ?? [],
+  });
   pet.hidden = !visible;
   if (!visible) {
+    clearTimeout(assistantWalkTimer);
+    assistantWasVisible = false;
+    assistantPlayer?.setEnabled(false);
     closeAssistantBubble(false, true);
     return;
   }
+  const identity = `${state.projection?.company?.id}/${assistant.employeeId}`;
+  if (assistantIdentity !== identity) {
+    clearTimeout(assistantWalkTimer);
+    assistantPlayer?.destroy();
+    assistantIdentity = identity;
+    assistantWasVisible = false;
+    assistantPlayer = createSpritePlayer(pet.querySelector('.fc-assistant-sprite'), {
+      employeeId: assistant.employeeId, assistant: true,
+      reduced: () => reducePopoverMotion.matches,
+    });
+  }
+  assistantPlayer.setEnabled(live);
+  const base = view.assistantOpen ? 'point'
+    : assistant.condition ? 'stress'
+      : assistant.availability === 'WORKING' ? 'think'
+        : attentionCount(state.projection) === 0 && Date.now() - assistantLastInteraction > 60000 ? 'sleep' : 'idle';
+  assistantPlayer.setBase(base);
+  if (!assistantWasVisible && live && !reducePopoverMotion.matches) {
+    assistantPlayer.play('walk');
+    clearTimeout(assistantWalkTimer);
+    assistantWalkTimer = setTimeout(() => assistantPlayer?.setBase(base), 550);
+  } else if (event && live && !reducePopoverMotion.matches) assistantPlayer.play(event);
+  assistantWasVisible = true;
   $('assistant-name').textContent = assistant.displayName;
   $('assistant-role').textContent = assistant.position?.title ?? '创始人助理';
   pet.dataset.availability = assistant.availability;
   pet.dataset.stale = String(freshness(state) === 'STALE');
   pet.setAttribute('aria-label', `${assistant.displayName}，${assistant.position?.title ?? '创始人助理'}，${availabilityText(assistant.availability)}。单击查看简报，双击查看员工详情。`);
-  pet.querySelector('.fc-assistant-sprite').style.backgroundImage = `url('/employee-assets/assets/sprite-${spriteNumber(assistant.employeeId)}.png')`;
   if (!view.assistantOpen) return;
   const bubble = $('assistant-bubble');
   const signature = JSON.stringify([assistant, state.projection.attention, state.projection.primaryWork, freshness(state)]);
@@ -1401,6 +1440,7 @@ function openAssistantBubble() {
   void closeSearch();
   assistantBubbleEpoch += 1;
   view.assistantOpen = true;
+  assistantLastInteraction = Date.now();
   const bubble = $('assistant-bubble');
   bubble.hidden = false;
   pet.setAttribute('aria-expanded', 'true');
@@ -1413,6 +1453,8 @@ function closeAssistantBubble(restoreFocus = false, immediate = false) {
   const bubble = $('assistant-bubble');
   if (!view.assistantOpen && bubble.hidden) return;
   view.assistantOpen = false;
+  assistantLastInteraction = Date.now();
+  assistantPlayer?.setBase(store.state.projection?.founderAssistant?.availability === 'WORKING' ? 'think' : 'idle');
   const epoch = ++assistantBubbleEpoch;
   $('assistant-pet').setAttribute('aria-expanded', 'false');
   if (immediate) {
@@ -2330,12 +2372,18 @@ function wireOnce() {
     $(id).replaceChildren(symbol('close'));
   $('assistant-pet').addEventListener('click', (event) => {
     clearTimeout(assistantClickTimer);
+    assistantLastInteraction = Date.now();
+    assistantPlayer?.play('wave');
     if (event.detail >= 2) {
       const employeeId = store.state.projection?.founderAssistant?.employeeId;
       closeAssistantBubble(false, true);
       if (employeeId) select({ type: 'EMPLOYEE', id: employeeId }, $('assistant-pet'));
     } else if (event.detail === 0) openAssistantBubble();
     else assistantClickTimer = setTimeout(openAssistantBubble, 280);
+  });
+  $('assistant-pet').addEventListener('focus', () => {
+    clearTimeout(assistantWalkTimer);
+    assistantPlayer?.setBase(store.state.projection?.founderAssistant?.availability === 'WORKING' ? 'think' : 'idle');
   });
   $('assistant-bubble-close').addEventListener('click', () => closeAssistantBubble(true));
   $('assistant-employee-detail').addEventListener('click', () => {

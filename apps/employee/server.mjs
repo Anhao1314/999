@@ -9,11 +9,12 @@ import { isLocalBrowserRequest } from '../local-origin.mjs';
 
 const ROOT = new URL('./', import.meta.url);
 const ASSETS = new Set([
-  'scene-background.mjs', 'scene-background.css', 'scene-preference.mjs', 'launch-mars.mp4', 'app.mjs', 'adapter.mjs', 'domain.mjs', 'demo.mjs', 'avatar.mjs', 'styles.css', 'ui-tokens.css', 'icons.mjs', 'surface-motion.mjs',
+  'scene-background.mjs', 'scene-background.css', 'scene-preference.mjs', 'launch-mars.mp4', 'app.mjs', 'adapter.mjs', 'domain.mjs', 'demo.mjs', 'avatar.mjs', 'sprite-motion.mjs', 'room-path.mjs', 'assets/manifest.json', 'styles.css', 'ui-tokens.css', 'icons.mjs', 'surface-motion.mjs',
+  'assets/portrait-assistant.png', 'assets/sprite-assistant.png',
   ...Array.from({ length: 8 }, (_, i) => `assets/portrait-${i + 1}.png`),
   ...Array.from({ length: 8 }, (_, i) => `assets/sprite-${i + 1}.png`),
 ]);
-const TYPES = { mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png', mp4: 'video/mp4', html: 'text/html; charset=utf-8' };
+const TYPES = { mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', png: 'image/png', mp4: 'video/mp4', html: 'text/html; charset=utf-8', json: 'application/json; charset=utf-8' };
 
 // Re-exported for the Runtime process, which gates /commands with the same rule.
 export { isLocalBrowserRequest };
